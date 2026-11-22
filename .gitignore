@@ -1,0 +1,8 @@
+/target
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/testing-sources
+*.keys
+*.romux-tmp-*
+*.romux-part

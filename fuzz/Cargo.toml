@@ -1,0 +1,229 @@
+[package]
+name = "romux-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+romux = { path = "..", features = ["all-formats", "testkit"] }
+
+# Keep the fuzz crate out of the main workspace.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "probe_all"
+path = "fuzz_targets/probe_all.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pfs0"
+path = "fuzz_targets/pfs0.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "hfs0"
+path = "fuzz_targets/hfs0.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "xci"
+path = "fuzz_targets/xci.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "nsp"
+path = "fuzz_targets/nsp.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ncz"
+path = "fuzz_targets/ncz.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "romfs"
+path = "fuzz_targets/romfs.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ps4_pkg"
+path = "fuzz_targets/ps4_pkg.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "psf"
+path = "fuzz_targets/psf.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cia"
+path = "fuzz_targets/cia.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cci"
+path = "fuzz_targets/cci.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ncch"
+path = "fuzz_targets/ncch.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "gamecube"
+path = "fuzz_targets/gamecube.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wii_disc"
+path = "fuzz_targets/wii_disc.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wbfs"
+path = "fuzz_targets/wbfs.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "rvz"
+path = "fuzz_targets/rvz.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wad"
+path = "fuzz_targets/wad.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "u8"
+path = "fuzz_targets/u8.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wux"
+path = "fuzz_targets/wux.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wiiu_tmd"
+path = "fuzz_targets/wiiu_tmd.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "psp_iso"
+path = "fuzz_targets/psp_iso.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cso"
+path = "fuzz_targets/cso.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pbp"
+path = "fuzz_targets/pbp.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "vpk"
+path = "fuzz_targets/vpk.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "vita_pkg"
+path = "fuzz_targets/vita_pkg.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "xiso"
+path = "fuzz_targets/xiso.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "iso9660"
+path = "fuzz_targets/iso9660.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "chd"
+path = "fuzz_targets/chd.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "raw_bin"
+path = "fuzz_targets/raw_bin.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decompressors"
+path = "fuzz_targets/decompressors.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "n64"
+path = "fuzz_targets/n64.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "zar"
+path = "fuzz_targets/zar.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "xbox360"
+path = "fuzz_targets/xbox360.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "flac"
+path = "fuzz_targets/flac.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "snes"
+path = "fuzz_targets/snes.rs"
+test = false
+doc = false

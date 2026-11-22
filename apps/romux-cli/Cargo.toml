@@ -1,0 +1,36 @@
+[package]
+name = "romux-cli"
+description = "The romux command-line tool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+keywords = ["rom", "emulation", "cli", "nintendo", "playstation"]
+categories = ["command-line-utilities", "emulators"]
+readme = "../../README.md"
+
+[[bin]]
+name = "romux"
+path = "src/main.rs"
+doc = false
+
+[features]
+default = ["all-formats"]
+all-formats = ["romux/all-formats"]
+
+[dependencies]
+romux = { workspace = true, features = ["json"] }
+clap.workspace = true
+ctrlc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+romux = { workspace = true, features = ["all-formats", "testkit", "json"] }
+
+[lints]
+workspace = true

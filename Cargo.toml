@@ -1,0 +1,127 @@
+[package]
+name = "romux"
+description = "Romux: inspect, extract, verify, bundle, convert and compress console game packages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+keywords = ["rom", "emulation", "nintendo", "playstation", "xbox"]
+categories = ["emulators", "parser-implementations", "compression", "filesystem"]
+readme = "README.md"
+# Publish only the library; never docs, fuzzing, apps, tests or local sample files.
+include = ["/src/**", "/examples/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+
+[package.metadata.docs.rs]
+# Document every platform backend (the default features cover only some of them).
+features = ["all-formats"]
+
+[features]
+default = ["switch", "ps4", "disc", "psp", "compression-zstd", "json"]
+# Console backends (module names in parentheses where they differ).
+switch = ["dep:serde_json"]
+ps4 = []
+3ds = []        # module `n3ds`
+wii = ["zstd", "lzma"]
+wiiu = ["disc"]
+psp = ["disc"]
+vita = []
+xbox = []
+n64 = []
+snes = []
+disc = []
+# Codecs: Zstandard (NSZ/XCZ/NCZ, CHD zstd, RVZ) and LZMA/LZMA2 decoding (CHD, WIA/RVZ).
+zstd = ["dep:zstd"]
+lzma = ["dep:lzma-rs"]
+compression-zstd = ["zstd"]
+compression-chd = ["lzma"]
+json = ["dep:serde_json"]
+# Synthetic fixture builders (tests only; not a stable API).
+testkit = []
+all-formats = ["switch", "ps4", "3ds", "wii", "wiiu", "psp", "vita", "xbox", "n64", "snes", "disc", "compression-zstd", "compression-chd", "json"]
+
+[dependencies]
+serde.workspace = true
+serde_json = { workspace = true, optional = true }
+zeroize.workspace = true
+aes.workspace = true
+sha2.workspace = true
+sha1.workspace = true
+md-5.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
+zstd = { workspace = true, optional = true }
+lzma-rs = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+required-features = ["all-formats", "testkit"]
+
+[[test]]
+name = "compatibility"
+path = "tests/compatibility/main.rs"
+required-features = ["all-formats", "testkit"]
+
+[[example]]
+name = "inspect_file"
+required-features = []
+
+[[example]]
+name = "switch_bundle"
+required-features = ["switch"]
+
+[workspace]
+resolver = "2"
+exclude = ["fuzz"]
+members = [".", "apps/romux-cli"]
+default-members = [".", "apps/romux-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Aspenini/romux"
+homepage = "https://github.com/Aspenini/romux"
+authors = ["Aspenini"]
+
+[workspace.dependencies]
+romux = { path = ".", version = "0.1.0", default-features = false }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zeroize = "1.8"
+aes = "0.8"
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+crc32fast = "1.4"
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+zstd = { version = "0.13", default-features = false }
+lzma-rs = "0.3"
+clap = { version = "4.5", features = ["derive"] }
+ctrlc = "3.4"
+tempfile = "3.10"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
+[profile.dev.package."*"]
+opt-level = 2

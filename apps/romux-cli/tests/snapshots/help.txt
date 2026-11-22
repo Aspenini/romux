@@ -1,0 +1,40 @@
+Inspect, extract, verify, bundle, convert and compress console game packages
+
+Usage: romux.exe [OPTIONS] <COMMAND>
+
+Commands:
+  formats       List compiled formats and their capabilities
+  probe         Identify formats with evidence
+  inspect       Show container, title, versions and relationships
+  list          Enumerate files, partitions and embedded content
+  extract       Write selected content to an output directory
+  verify        Check structure, hashes and (when possible) signatures
+  capabilities  Show operations available for a file in the current context
+  scan          Inspect a folder and group recognised files (report only)
+  convert       Convert along a declared edge of the conversion graph
+  switch        Nintendo Switch operations
+  ps4           PlayStation 4 operations
+  3ds           Nintendo 3DS operations
+  wii           GameCube / Wii operations
+  wiiu          Wii U operations
+  psp           PSP operations
+  vita          PS Vita operations
+  xbox          Original Xbox and Xbox 360 operations
+  n64           Nintendo 64 operations
+  snes          Super Nintendo operations
+  disc          Generic disc operations (ISO9660, CUE/BIN, CHD)
+  help          Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                     Emit a machine-readable JSON result on stdout (progress stays on stderr)
+  -q, --quiet                    Suppress progress and non-essential output
+  -v, --verbose                  More detail in human-readable output
+      --color <COLOR>            Colour output [default: auto] [possible values: auto, always, never]
+      --dry-run                  Plan and report without writing anything
+      --overwrite                Allow replacing existing outputs (inputs are never overwritten)
+      --jobs <JOBS>              Worker threads for parallel chunk work [default: 1]
+      --temp-dir <TEMP_DIR>      Scratch directory for temporary data
+      --max-memory <MAX_MEMORY>  Memory budget, e.g. 512M or 2G
+      --key-file <KEY_FILE>      User-supplied key file (`name = hex` lines). Only consulted by operations that need keys
+  -h, --help                     Print help
+  -V, --version                  Print version

@@ -136,3 +136,11 @@ structures only. No implementation code was copied.
   per package; title, publisher, icon and localized titles/icons from the newest Control
   data on the base package; the input file name as provenance.
 - RomFS sections using compressed or sparse storage are not extracted yet.
+- `switch pack-nup` packs an already-decrypted dump folder instead, with no keys: `base/`,
+  `updates/<decimal version>/` and `dlc/<16-hex title id>/<index>/` (or a folder holding
+  `exefs/`/`romfs/` as a single base). Each package stores its folder tree as found;
+  `.listing` files are excluded and symbolic links refused. Title IDs come from the ACI0
+  program ID in `exefs/main.npdm` (`--title-id` overrides the base), the build ID from
+  `exefs/main`, and the folder name is recorded as provenance. Without a base package every
+  update is flagged `standalone_update`. NX cannot be built from such folders, because
+  they carry no CNMT or Control records to establish snapshot types and versions.

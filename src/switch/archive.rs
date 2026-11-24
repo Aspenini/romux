@@ -11,7 +11,11 @@
 //!   Display metadata (titles, publisher, icons, NACP) comes from Control data.
 //! * **NUP**: one package per content set with extracted `exefs/` and `romfs/` trees. An
 //!   update package holds the complete updated tree (BKTR applied to the base RomFS).
+//!
+//! A NUP can also be packed from an already-decrypted dump folder (`base/`, `updates/<v>/`,
+//! `dlc/<id>/<n>/`, see [`crate::switch::dump`]); that needs no keys.
 
+use crate::switch::dump::{self, Dump};
 use crate::switch::formats::{SWITCH_NUP, SWITCH_NX};
 use crate::switch::native::{self, NativeContent, NativeTitle, Tree};
 use crate::switch::reader::{OpenedPackage, open_package};
@@ -70,6 +74,7 @@ pub struct ArchiveBuilder {
     format: ArchiveFormat,
     ctx: OpenContext,
     level: Option<i32>,
+    title_id: Option<u64>,
 }
 
 /// The validated plan.
@@ -79,15 +84,18 @@ pub struct ArchivePlan {
     // Kept alive for the decrypted views held by `titles`.
     _packages: Vec<OpenedPackage>,
     titles: Vec<NativeTitle>,
+    /// Set when packing an already-decrypted dump folder.
+    dump: Option<Dump>,
     ctx: OpenContext,
     level: Option<i32>,
 }
 
 impl ArchiveBuilder {
     pub fn new(format: ArchiveFormat) -> Self {
-        ArchiveBuilder { inputs: Vec::new(), format, ctx: OpenContext::default(), level: None }
+        ArchiveBuilder { inputs: Vec::new(), format, ctx: OpenContext::default(), level: None, title_id: None }
     }
-    /// Add an input package (base, update, DLC or a bundle; roles come from its CNMTs).
+    /// Add an input package (base, update, DLC or a bundle; roles come from its CNMTs), or,
+    /// for NUP, one already-decrypted dump folder.
     pub fn input(mut self, p: impl Into<PathBuf>) -> Self {
         self.inputs.push(p.into());
         self
@@ -105,10 +113,21 @@ impl ArchiveBuilder {
         self.level = Some(l);
         self
     }
+    /// Dump folders only: the base title ID, overriding the one read from `main.npdm`.
+    pub fn title_id(mut self, id: u64) -> Self {
+        self.title_id = Some(id);
+        self
+    }
 
     pub fn plan(self) -> Result<ArchivePlan> {
         if self.inputs.is_empty() {
             return Err(Error::invalid_arg("no input packages"));
+        }
+        if self.inputs.iter().any(|p| dump::is_dump_dir(p)) {
+            return self.plan_dump();
+        }
+        if self.title_id.is_some() {
+            return Err(Error::invalid_arg("a title ID override applies only to dump folders; packages carry their own IDs"));
         }
         let mut plan = TransformPlan::new(Operation::Convert);
         let mut packages = Vec::new();
@@ -141,7 +160,48 @@ impl ArchiveBuilder {
             plan.warnings.push("CNMT declares Switch 2 content; Switch 2 association rules are not verified".into());
         }
         let level = self.level.or(Some(3)).filter(|&l| l > 0);
-        Ok(ArchivePlan { plan, format: self.format, _packages: packages, titles, ctx: self.ctx, level })
+        Ok(ArchivePlan { plan, format: self.format, _packages: packages, titles, dump: None, ctx: self.ctx, level })
+    }
+
+    fn plan_dump(self) -> Result<ArchivePlan> {
+        let root = match self.inputs.as_slice() {
+            [one] => one.clone(),
+            _ => return Err(Error::invalid_arg("pack one dump folder at a time (it may hold base/, updates/ and dlc/)")),
+        };
+        if self.format != ArchiveFormat::Nup {
+            return Err(Error::new(
+                ErrorCode::InvalidOutputFormat,
+                "an extracted dump folder has no CNMT or Control records, so its NX snapshot types and versions cannot be established; pack it as NUP",
+            ));
+        }
+        let d = dump::discover(&root, self.title_id)?;
+        let mut plan = TransformPlan::new(Operation::Repack);
+        plan.warnings.extend(d.warnings.iter().cloned());
+        for p in &d.packages {
+            plan.steps.push(format!(
+                "package {} {:016x} version {}{}: {} files, {} bytes",
+                match p.kind {
+                    nup::KIND_BASE => "base",
+                    nup::KIND_UPDATE => "update",
+                    _ => "addon",
+                },
+                p.title_id,
+                p.version,
+                if p.flags & nup::FLAG_STANDALONE_UPDATE != 0 { " (standalone update)" } else { "" },
+                p.tree.files.len(),
+                p.tree.files.iter().map(|f| f.size).sum::<u64>()
+            ));
+        }
+        plan.steps.push("store files as found (already decrypted), deduplicate by SHA-256, compress with zstd".into());
+        plan.details.insert("source_directory".into(), root.display().to_string().into());
+        plan.details.insert("files".into(), (d.files.len() as u64).into());
+        plan.details.insert("logical_bytes".into(), d.logical_size().into());
+        plan.guarantees =
+            vec![OutputGuarantee::ContentPreserved, OutputGuarantee::DerivedArtifact, OutputGuarantee::CompatibilityUnverified];
+        plan.restrictions
+            .push("package roles, title IDs and versions come from the folder layout and main.npdm, not from signed metadata".into());
+        let level = self.level.or(Some(3)).filter(|&l| l > 0);
+        Ok(ArchivePlan { plan, format: self.format, _packages: Vec::new(), titles: Vec::new(), dump: Some(d), ctx: self.ctx, level })
     }
 }
 
@@ -437,9 +497,26 @@ impl ArchivePlan {
     pub fn execute(self, output: impl AsRef<Path>, job: &JobContext) -> Result<OperationReport> {
         self.plan.revalidate()?;
         let output = output.as_ref().to_path_buf();
-        let mut out = AtomicFile::create(&output, &job.io, &self.plan.input_paths())?;
-        let mut rep = OperationReport::new(self.plan.operation, self.plan.input_paths());
+        let mut inputs = self.plan.input_paths();
+        if let Some(d) = &self.dump {
+            d.verify_unchanged()?;
+            inputs.extend(d.file_paths());
+        }
+        let mut out = AtomicFile::create(&output, &job.io, &inputs)?;
+        let mut rep = OperationReport::new(
+            self.plan.operation,
+            self.dump.as_ref().map(|d| vec![d.root.clone()]).unwrap_or_else(|| self.plan.input_paths()),
+        );
         match self.format {
+            ArchiveFormat::Nup if self.dump.is_some() => {
+                let pkgs = &self.dump.as_ref().map(|d| &d.packages).ok_or_else(|| Error::internal("dump packages"))?;
+                let stats = nup::write(&mut out, pkgs, self.level, job)?;
+                rep.metadata.insert("packages".into(), (pkgs.len() as u64).into());
+                rep.metadata.insert("files".into(), (stats.files as u64).into());
+                rep.metadata.insert("unique_extents".into(), (stats.unique_extents as u64).into());
+                rep.metadata.insert("logical_bytes".into(), stats.logical_bytes.into());
+                rep.metadata.insert("stored_bytes".into(), stats.stored_bytes.into());
+            }
             ArchiveFormat::Nx => {
                 let mut apps = nx_applications(&self.titles)?;
                 let opts = nx::WriteOptions { level: self.level, ..Default::default() };
@@ -491,7 +568,11 @@ impl ArchivePlan {
             path: output.clone(),
             format: Some(self.format.format_id()),
             kind: "file",
-            category: format!("decrypted {} archive", self.format.extension().to_uppercase()),
+            category: format!(
+                "{} {} archive",
+                if self.dump.is_some() { "packed" } else { "decrypted" },
+                self.format.extension().to_uppercase()
+            ),
             estimated_size: None,
         });
         Box::new(PlannedArchive { plan: self, output })

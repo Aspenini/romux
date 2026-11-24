@@ -42,6 +42,8 @@ segments. A pattern without a `/` also matches basenames.
 romux switch inspect|extract|verify ...
 romux switch bundle <base> [--update <path>]... [--dlc <path>]... --format nsp|xci|nsz|xcz|nx|nup --output <path>
                     [--convert-rights] [--allow-unverified] [--level N]
+romux switch pack-nup <dump dir> --output <path> [--level N] [--title-id 16HEX]
+                    (already-decrypted dump: base/, updates/<version>/, dlc/<id>/<n>/; no keys)
 romux switch apply-update <base> <update> --output <dir>
 romux switch split <bundle> --output <dir>
 romux switch convert <input> --format nsp|xci|nsz|xcz|nx|nup --output <path> [--convert-rights] [--level N]

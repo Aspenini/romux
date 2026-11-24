@@ -60,6 +60,7 @@ cargo build --release
 ./target/release/romux --key-file prod.keys switch compress all.nsp -o all.nsz
 ./target/release/romux --key-file prod.keys switch bundle base.nsp --update upd.nsp --dlc dlc.nsp --format nx -o game.nx
 ./target/release/romux --key-file prod.keys switch convert game.xci --format nup -o game.nup
+./target/release/romux switch pack-nup ./dump -o game.nup        # already-decrypted base/ + updates/ folders
 ./target/release/romux verify game.nx --level all
 ./target/release/romux psp compress game.iso -o game.cso
 ./target/release/romux --json probe unknown.bin
@@ -107,7 +108,7 @@ plan.execute(&romux::JobContext::default())?;
 Enable only what you need:
 
 ```toml
-romux = { version = "0.2", default-features = false, features = ["switch", "disc"] }
+romux = { version = "0.3", default-features = false, features = ["switch", "disc"] }
 ```
 
 Features: `switch`, `ps4`, `3ds`, `wii`, `wiiu`, `psp`, `vita`, `xbox`, `n64`, `snes`, `disc`,

@@ -334,3 +334,28 @@ fn switch_nx_and_nup_via_cli_with_key_file() {
     assert_eq!(code, 0, "{o}{e}");
     assert!(!o.contains(&romux::hex(&k.header_key)) && !e.contains(&romux::hex(&k.header_key)));
 }
+
+#[test]
+fn switch_pack_nup_from_dump_folder() {
+    let d = tempfile::tempdir().unwrap();
+    let dump = d.path().join("dump");
+    std::fs::create_dir_all(dump.join("base/exefs")).unwrap();
+    std::fs::create_dir_all(dump.join("updates/65536/romfs")).unwrap();
+    std::fs::write(dump.join("base/exefs/main"), vec![1u8; 0x100]).unwrap();
+    std::fs::write(dump.join("updates/65536/romfs/a.bin"), vec![2u8; 5000]).unwrap();
+    let out = d.path().join("game.nup");
+    let (code, o, e) = run(&["--json", "--dry-run", "switch", "pack-nup", dump.to_str().unwrap(), "-o", out.to_str().unwrap()]);
+    assert_eq!(code, 0, "{o}{e}");
+    assert!(!out.exists(), "dry run writes nothing");
+    let (code, o, e) =
+        run(&["--json", "switch", "pack-nup", dump.to_str().unwrap(), "-o", out.to_str().unwrap(), "--title-id", "0100000000010000"]);
+    assert_eq!(code, 0, "{o}{e}");
+    assert_eq!(json(&o)["outputs"][0]["format"], "switch.nup");
+    let (code, o, _) = run(&["--json", "inspect", out.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert_eq!(json(&o)["metadata"]["package"]["title_id"], "0100000000010000");
+    let (code, _, _) = run(&["verify", out.to_str().unwrap(), "--level", "all"]);
+    assert_eq!(code, 0);
+    let (code, _, _) = run(&["switch", "pack-nup", dump.to_str().unwrap(), "-o", out.to_str().unwrap(), "--title-id", "xyz"]);
+    assert_ne!(code, 0);
+}

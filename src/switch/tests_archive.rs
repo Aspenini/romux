@@ -486,3 +486,91 @@ fn mutated_archives_never_panic() {
         }
     }
 }
+
+fn npdm(program_id: u64) -> Vec<u8> {
+    let mut n = vec![0u8; 0x100];
+    n[..4].copy_from_slice(b"META");
+    n[0x70..0x74].copy_from_slice(&0x80u32.to_le_bytes());
+    n[0x74..0x78].copy_from_slice(&0x40u32.to_le_bytes());
+    n[0x80..0x84].copy_from_slice(b"ACI0");
+    n[0x90..0x98].copy_from_slice(&program_id.to_le_bytes());
+    n
+}
+
+fn write(root: &Path, rel: &str, data: &[u8]) {
+    let p = root.join(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, data).unwrap();
+}
+
+#[test]
+fn nup_from_dump_folder() {
+    let d = tempfile::tempdir().unwrap();
+    let dump = d.path().join("My Game");
+    write(&dump, "base/exefs/main", &nso(0x31));
+    write(&dump, "base/exefs/main.npdm", &npdm(APP));
+    write(&dump, "base/exefs/.listing", b"ftp junk");
+    write(&dump, "updates/655360/exefs/main", &nso(0x32));
+    write(&dump, "updates/655360/exefs/main.npdm", &npdm(APP));
+    write(&dump, "updates/655360/romfs/data/big.bin", &(0..300_000u32).map(|i| (i % 7) as u8).collect::<Vec<_>>());
+    write(&dump, "updates/655360/romfs/same.bin", b"same");
+    write(&dump, "updates/655360/romfs/copy.bin", b"same");
+    std::fs::create_dir_all(dump.join("updates/655360/romfs/empty")).unwrap();
+    write(&dump, "updates/notes/readme.txt", b"skipped");
+    write(&dump, &format!("dlc/{DLC:016x}/0/romfs/item.bin"), &[9u8; 100]);
+    write(&dump, "dlc/not-a-title/0/romfs/x.bin", b"skipped");
+
+    // NX needs native records; a dump folder is refused.
+    let e = ArchiveBuilder::new(ArchiveFormat::Nx).input(&dump).plan().err().unwrap();
+    assert_eq!(e.code(), ErrorCode::InvalidOutputFormat);
+
+    let out = d.path().join("game.nup");
+    let plan = ArchiveBuilder::new(ArchiveFormat::Nup).input(&dump).plan().unwrap();
+    assert_eq!(plan.describe().steps.len(), 4, "{:#?}", plan.describe().steps);
+    assert!(plan.describe().warnings.iter().any(|w| w.contains("updates/notes")));
+    assert!(plan.describe().warnings.iter().any(|w| w.contains("dlc/not-a-title")));
+    let rep = plan.into_planned(out.clone()).execute(&JobContext::default()).unwrap();
+    assert!(rep.verification.as_ref().unwrap().no_failures());
+
+    let r = open_reader(&out);
+    let v = r.verify(VerifyLevel::All, &JobContext::default()).unwrap();
+    assert!(v.no_failures(), "{:#?}", v.checks);
+    let p = paths(r.as_ref());
+    assert!(!p.iter().any(|x| x.ends_with(".listing")), "dump-tool artifacts are excluded");
+    assert!(p.contains(&"update-v655360/romfs/empty".to_string()), "empty directories are kept");
+    assert_eq!(read_entry(r.as_ref(), "update-v655360/exefs/main"), nso(0x32));
+    assert_eq!(read_entry(r.as_ref(), &format!("addon-{DLC:016x}/romfs/item.bin")), vec![9u8; 100]);
+
+    let n = nup::Nup::open(crate::open_file(&out).unwrap(), &Default::default()).unwrap();
+    let kinds: Vec<_> = n.packages.iter().map(|p| (p.kind, p.title_id, p.version, p.flags)).collect();
+    assert_eq!(kinds, vec![(nup::KIND_BASE, APP, 0, 0), (nup::KIND_UPDATE, APP, 655360, 0), (nup::KIND_ADDON, DLC, 0, 0)]);
+    let base = &n.packages[0];
+    assert_eq!(base.romfs_dir, 0xFFFF_FFFF, "the base dump has no RomFS");
+    assert_ne!(base.exefs_dir, 0xFFFF_FFFF);
+    assert_eq!(base.meta.get(&nup::TLV_BUILD_ID).map(|b| b.as_slice()), Some(&[0x31u8; 32][..]));
+    assert_eq!(base.meta.get(&nup::TLV_NPDM).map(|b| b.as_slice()), Some(npdm(APP).as_slice()));
+    assert_eq!(base.text(nup::TLV_SOURCE_DUMP).as_deref(), Some("My Game"));
+    let same: Vec<_> = n.files.iter().filter(|f| f.name == "same.bin" || f.name == "copy.bin").collect();
+    assert_eq!(same[0].extent_offset, same[1].extent_offset, "identical files share one extent");
+
+    // An update-only dump: every update is standalone; the title ID can be overridden.
+    let only = d.path().join("updonly");
+    write(&only, "updates/65536/exefs/main", &nso(1));
+    let out2 = d.path().join("upd.nup");
+    ArchiveBuilder::new(ArchiveFormat::Nup).input(&only).title_id(APP).plan().unwrap().execute(&out2, &JobContext::default()).unwrap();
+    let n = nup::Nup::open(crate::open_file(&out2).unwrap(), &Default::default()).unwrap();
+    assert_eq!((n.packages[0].kind, n.packages[0].flags, n.packages[0].title_id), (nup::KIND_UPDATE, nup::FLAG_STANDALONE_UPDATE, APP));
+
+    // A bare content folder is one base package; a folder without content is refused.
+    let bare = d.path().join("bare");
+    write(&bare, "romfs/a.txt", b"a");
+    let out3 = d.path().join("bare.nup");
+    ArchiveBuilder::new(ArchiveFormat::Nup).input(&bare).plan().unwrap().execute(&out3, &JobContext::default()).unwrap();
+    let junk = d.path().join("junk");
+    write(&junk, "stuff/a.txt", b"a");
+    assert_eq!(ArchiveBuilder::new(ArchiveFormat::Nup).input(&junk).plan().err().unwrap().code(), ErrorCode::UnknownFormat);
+    // The dump must not change between planning and writing.
+    let plan = ArchiveBuilder::new(ArchiveFormat::Nup).input(&bare).plan().unwrap();
+    write(&bare, "romfs/a.txt", b"changed!");
+    assert!(plan.execute(d.path().join("late.nup"), &JobContext::default()).is_err());
+}

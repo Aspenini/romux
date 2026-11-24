@@ -27,6 +27,7 @@ pub(crate) mod bktr;
 pub(crate) mod bundle;
 pub(crate) mod cnmt;
 pub(crate) mod convert;
+pub(crate) mod dump;
 pub(crate) mod keys;
 pub(crate) mod nacp;
 pub(crate) mod native;
@@ -250,7 +251,7 @@ pub(crate) fn descriptors() -> Vec<FormatDescriptor> {
             vec![key("header_key"), key("key_area_key_application_XX"), key("titlekek_XX")],
         )
         .op_req(Bundle, Conditional, "switch bundle --format nup: one game's base + updates + add-ons", vec![key("header_key")])
-        .op(Repack, Unsupported, "packing loose dump folders is not offered")
+        .op(Repack, Supported, "switch pack-nup: from an already-decrypted dump folder (base/, updates/<version>/, dlc/<id>/<n>/); no keys")
         .op(Scan, Supported, "grouped by title ID"),
         FormatDescriptor::new(SWITCH_ROMFS, Platform::Switch, "RomFS", &["romfs"], "level-3 RomFS image (as extracted from an NCA)")
             .op(Probe, Supported, "header layout heuristics (low confidence)")

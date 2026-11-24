@@ -323,6 +323,19 @@ enum SwitchCmd {
         #[arg(long)]
         allow_unverified: bool,
     },
+    /// Pack an already-decrypted dump folder (base/, updates/<version>/, dlc/<id>/<n>/,
+    /// or a folder holding exefs/ and romfs/) into a NUP container. No keys needed.
+    PackNup {
+        directory: PathBuf,
+        #[arg(long, short)]
+        output: PathBuf,
+        /// Zstandard level (default 3; 0 stores uncompressed).
+        #[arg(long)]
+        level: Option<i32>,
+        /// Base title ID (16 hex digits), overriding the one read from exefs/main.npdm.
+        #[arg(long)]
+        title_id: Option<String>,
+    },
     /// Reconstruct an updated derived content tree (BKTR), not a package.
     ApplyUpdate {
         base: PathBuf,
@@ -705,6 +718,21 @@ impl App {
                     b = b.dlc(d);
                 }
                 self.run_plan("bundle", b.plan()?.into_planned(output.clone()))
+            }
+            SwitchCmd::PackNup { directory, output, level, title_id } => {
+                let mut b = ArchiveBuilder::new(ArchiveFormat::Nup).input(directory).context(self.ctx.clone());
+                if let Some(l) = level {
+                    b = b.level(*l);
+                }
+                if let Some(t) = title_id {
+                    let t = t.trim_start_matches("0x");
+                    let id = u64::from_str_radix(t, 16)
+                        .ok()
+                        .filter(|_| t.len() == 16)
+                        .ok_or_else(|| Error::invalid_arg(format!("title ID {t:?} must be 16 hex digits")))?;
+                    b = b.title_id(id);
+                }
+                self.run_plan("pack-nup", b.plan()?.into_planned(output.clone()))
             }
             SwitchCmd::ApplyUpdate { base, update, output } => {
                 let plan = ApplyUpdateBuilder::new(base, update).output_directory(output).context(self.ctx.clone()).plan()?;

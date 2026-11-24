@@ -32,7 +32,7 @@ A listed console does not imply that every operation works for every encrypted r
 | `switch.ncz` | switch | supported | supported | supported | supported | supported | unsupported | unsupported | unsupported | unsupported | conditional | unsupported | unsupported | unsupported |
 | `switch.nsp` | switch | supported | supported | supported | supported | supported | conditional | conditional | conditional | conditional | unsupported | conditional | unsupported | supported |
 | `switch.nsz` | switch | supported | supported | supported | supported | supported | conditional | conditional | conditional | unsupported | conditional | conditional | unsupported | supported |
-| `switch.nup` | switch | supported | supported | supported | supported | supported | conditional | unsupported | conditional | unsupported | unsupported | unsupported | unsupported | supported |
+| `switch.nup` | switch | supported | supported | supported | supported | supported | conditional | unsupported | conditional | unsupported | unsupported | unsupported | supported | supported |
 | `switch.nx` | switch | supported | supported | supported | supported | supported | conditional | unsupported | conditional | unsupported | unsupported | unsupported | unsupported | supported |
 | `switch.pfs0` | switch | supported | supported | supported | supported | supported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | supported | unsupported |
 | `switch.romfs` | switch | supported | supported | supported | supported | supported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | supported | unsupported |
@@ -386,7 +386,7 @@ container of unencrypted Switch 1/2 ExeFS/RomFS trees (base, updates, add-ons). 
 - **verify**: supported — superblock, TOC SHA-256, tree structure, UUID; content: per-file SHA-256
 - **convert**: conditional — built from NSP/NSZ/XCI/XCZ by decrypting and extracting ExeFS/RomFS (keys); BKTR updates applied to their base Requires: KeyMaterial("header_key"), KeyMaterial("key_area_key_application_XX"), KeyMaterial("titlekek_XX").
 - **bundle**: conditional — switch bundle --format nup: one game's base + updates + add-ons Requires: KeyMaterial("header_key").
-- **repack**: unsupported — packing loose dump folders is not offered
+- **repack**: supported — switch pack-nup: from an already-decrypted dump folder (base/, updates/<version>/, dlc/<id>/<n>/); no keys
 - **scan**: supported — grouped by title ID
 
 ### `switch.nx` — NX

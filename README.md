@@ -16,7 +16,7 @@ certificates or firmware.
 
 | Platform | Formats | Highlights |
 |---|---|---|
-| Nintendo Switch | NSP, NSZ, XCI, XCZ, NCA, NCZ, PFS0, HFS0, RomFS | multi-content **bundle**, **split**, NSP⇄XCI, NSZ/XCZ compress/decompress (byte-identical), BKTR **apply-update** to a derived tree, content-ID and HFS0 hash verification |
+| Nintendo Switch | NSP, NSZ, XCI, XCZ, NCA (incl. decrypted DNCA), NCZ, PFS0, HFS0, RomFS, **NX**, **NUP** | multi-content **bundle**, **split**, NSP⇄XCI, NSZ/XCZ compress/decompress (byte-identical), BKTR **apply-update** to a derived tree, content-ID and HFS0 hash verification; read/verify/extract Switch 1 and 2 **NX** and **NUP** archives without keys, and build them from your encrypted packages with your keys |
 | PlayStation 4 | PKG, param.sfo | header/entry table, unencrypted entry extraction, PFS metadata |
 | Nintendo 3DS | CCI/.3ds, NCCH (CXI/CFA), CIA | ExeFS/RomFS for NoCrypto and (with your keys) encrypted NCCH, incl. seeds; TMD hash checks; unsigned CCI→CIA |
 | GameCube / Wii | GCM/ISO, Wii ISO, WBFS, RVZ, WIA, WAD, U8 | FST extraction, Wii partition decryption (user key) with full H0–H3 checks, RVZ read/write for GameCube (incl. junk packing and regeneration), Wii RVZ/WIA→ISO restoration (re-encryption + H0–H3 regeneration, no key needed), Wii ISO/WBFS→RVZ (common key), WBFS⇄ISO, U8 repack |
@@ -58,6 +58,9 @@ cargo build --release
 ./target/release/romux verify image.chd --level all
 ./target/release/romux --dry-run switch bundle base.nsp --update upd.nsp --dlc dlc.nsp --format nsp -o all.nsp
 ./target/release/romux --key-file prod.keys switch compress all.nsp -o all.nsz
+./target/release/romux --key-file prod.keys switch bundle base.nsp --update upd.nsp --dlc dlc.nsp --format nx -o game.nx
+./target/release/romux --key-file prod.keys switch convert game.xci --format nup -o game.nup
+./target/release/romux verify game.nx --level all
 ./target/release/romux psp compress game.iso -o game.cso
 ./target/release/romux --json probe unknown.bin
 ```
@@ -84,6 +87,15 @@ let plan = romux::switch::BundleBuilder::new("base.nsp")
 println!("{:#?}", plan.describe());
 plan.execute("combined.xci", &romux::JobContext::default())?;
 
+// Decrypt base + update + DLC into one NX archive (or ArchiveFormat::Nup).
+let plan = romux::switch::ArchiveBuilder::new(romux::switch::ArchiveFormat::Nx)
+    .input("base.nsp")
+    .input("update.nsp")
+    .input("dlc-a.nsp")
+    .keys(romux::load_keys("prod.keys")?)
+    .plan()?;
+plan.execute("game.nx", &romux::JobContext::default())?;
+
 // A different operation: reconstruct an updated derived tree.
 let plan = romux::switch::ApplyUpdateBuilder::new("base.nsp", "update.nsp")
     .output_directory("updated-content")
@@ -95,7 +107,7 @@ plan.execute(&romux::JobContext::default())?;
 Enable only what you need:
 
 ```toml
-romux = { version = "0.1", default-features = false, features = ["switch", "disc"] }
+romux = { version = "0.2", default-features = false, features = ["switch", "disc"] }
 ```
 
 Features: `switch`, `ps4`, `3ds`, `wii`, `wiiu`, `psp`, `vita`, `xbox`, `n64`, `snes`, `disc`,
@@ -138,6 +150,10 @@ More examples live in [`examples`](examples) and
 - The Switch BKTR (update) path is tested against synthetic data built with the documented
   layout. Compatibility with real titles is a separate, opt-in test
   (see [`docs/compatibility.md`](docs/compatibility.md)).
+- NX and NUP output is checked by Romux's own spec-validating readers. It has not yet been
+  cross-checked with the reference NXConvert/NUP tools or loaded in an emulator. NX rebuild
+  recipes are not written, and NUP extraction does not handle compressed or sparse RomFS
+  storage yet.
 - Romux makes no claims about emulator compatibility.
 
 ## Repository layout

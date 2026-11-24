@@ -248,3 +248,89 @@ fn switch_bundle_split_via_cli_with_key_file() {
     // Key values must never be echoed.
     assert!(!o.contains(&romux::hex(&k.header_key)) && !e.contains(&romux::hex(&k.header_key)));
 }
+
+/// Like `title_nsp`, but the Program NCA carries `program_id` (updates use the base ID).
+fn program_nsp(dir: &Path, name: &str, tid: u64, program_id: u64, mt: u8, version: u32, related: u64, k: &TestKeys) -> PathBuf {
+    let content = build(
+        &Spec {
+            content_type: ContentType::Program,
+            program_id,
+            sections: vec![Section::Pfs0(pfs0_image(&[("main", vec![version as u8; 0x3000]), ("main.npdm", b"META".to_vec())]))],
+            titlekey: None,
+            distribution: 0,
+        },
+        k,
+    );
+    let cname = content_name(&content, false);
+    let cnmt = romux::switch::testkit::build_binary(
+        tid,
+        version,
+        mt,
+        related,
+        &[(cname.trim_end_matches(".nca").into(), romux::hex(&romux::crypto::sha256(&content)), content.len() as u64, 1)],
+    );
+    let meta = build(
+        &Spec {
+            content_type: ContentType::Meta,
+            program_id: tid,
+            sections: vec![Section::Pfs0(pfs0_image(&[("a.cnmt", cnmt)]))],
+            titlekey: None,
+            distribution: 0,
+        },
+        k,
+    );
+    let p = dir.join(name);
+    std::fs::write(&p, pfs0_image(&[(&content_name(&meta, true), meta), (&cname, content)])).unwrap();
+    p
+}
+
+#[test]
+fn switch_nx_and_nup_via_cli_with_key_file() {
+    let d = tempfile::tempdir().unwrap();
+    let k = TestKeys::sample();
+    let keys = write_keys(d.path(), &k);
+    let ks = keys.to_str().unwrap();
+    let base_id = 0x0100_0000_00D0_0000u64;
+    let base = program_nsp(d.path(), "base.nsp", base_id, base_id, 0x80, 0, base_id | 0x800, &k);
+    let upd = program_nsp(d.path(), "upd.nsp", base_id | 0x800, base_id, 0x81, 0x20000, base_id, &k);
+    let nx = d.path().join("game.nx");
+    let args =
+        ["switch", "bundle", base.to_str().unwrap(), "--update", upd.to_str().unwrap(), "--format", "nx", "-o", nx.to_str().unwrap()];
+    // Decryption needs keys.
+    let (code, _, _) = run(&args);
+    assert_eq!(code, romux::exit::PROTECTED_CONTENT);
+    let mut with_keys = vec!["--json", "--key-file", ks];
+    with_keys.extend_from_slice(&args);
+    let (code, o, e) = run(&with_keys);
+    assert_eq!(code, 0, "{o}{e}");
+    let v = json(&o);
+    assert_eq!(v["outputs"][0]["format"], "switch.nx");
+    assert!(v["outputs"][0]["guarantees"].as_array().unwrap().iter().any(|g| g == "decrypted"));
+    // Reading an NX never needs keys.
+    let (code, o, _) = run(&["--json", "inspect", nx.to_str().unwrap()]);
+    assert_eq!(code, 0, "{o}");
+    let v = json(&o);
+    assert_eq!(v["format"], "switch.nx");
+    assert_eq!(v["metadata"]["package"]["category"], "multi_content");
+    assert_eq!(v["metadata"]["content_graph"]["relations"][0]["kind"], "update_of");
+    let (code, o, _) = run(&["--json", "verify", nx.to_str().unwrap(), "--level", "all"]);
+    assert_eq!(code, 0, "{o}");
+    let nup = d.path().join("game.nup");
+    let (code, o, e) =
+        run(&["--json", "--key-file", ks, "switch", "convert", base.to_str().unwrap(), "--format", "nup", "-o", nup.to_str().unwrap()]);
+    assert_eq!(code, 0, "{o}{e}");
+    let (code, o, _) = run(&["--json", "list", nup.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    let entries: Vec<String> =
+        json(&o)["metadata"]["entries"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap().to_string()).collect();
+    assert!(entries.contains(&"base/exefs/main".to_string()), "{entries:?}");
+    let ex = d.path().join("ex");
+    let (code, _, _) = run(&["extract", nup.to_str().unwrap(), "-o", ex.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert_eq!(std::fs::read(ex.join("base/exefs/main.npdm")).unwrap(), b"META");
+    // Generic convert along the declared edge.
+    let nx2 = d.path().join("base.nx");
+    let (code, o, e) = run(&["--key-file", ks, "convert", base.to_str().unwrap(), "--format", "switch.nx", "-o", nx2.to_str().unwrap()]);
+    assert_eq!(code, 0, "{o}{e}");
+    assert!(!o.contains(&romux::hex(&k.header_key)) && !e.contains(&romux::hex(&k.header_key)));
+}

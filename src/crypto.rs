@@ -39,6 +39,47 @@ pub fn crc32(data: &[u8]) -> u32 {
     crc32fast::hash(data)
 }
 
+/// CRC-32C (Castagnoli, reflected polynomial `0x82f63b78`, initial and final XOR
+/// `0xffffffff`); the check value of `b"123456789"` is `0xe3069283`. Slicing-by-8.
+pub fn crc32c(data: &[u8]) -> u32 {
+    static TABLES: std::sync::OnceLock<Box<[[u32; 256]; 8]>> = std::sync::OnceLock::new();
+    let t = TABLES.get_or_init(|| {
+        let mut t = Box::new([[0u32; 256]; 8]);
+        for i in 0..256u32 {
+            let mut c = i;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { (c >> 1) ^ 0x82f6_3b78 } else { c >> 1 };
+            }
+            t[0][i as usize] = c;
+        }
+        for i in 0..256 {
+            for k in 1..8 {
+                let prev = t[k - 1][i];
+                t[k][i] = (prev >> 8) ^ t[0][(prev & 0xff) as usize];
+            }
+        }
+        t
+    });
+    let mut crc = !0u32;
+    let mut chunks = data.chunks_exact(8);
+    for c in &mut chunks {
+        let lo = u32::from_le_bytes([c[0], c[1], c[2], c[3]]) ^ crc;
+        let hi = u32::from_le_bytes([c[4], c[5], c[6], c[7]]);
+        crc = t[7][(lo & 0xff) as usize]
+            ^ t[6][((lo >> 8) & 0xff) as usize]
+            ^ t[5][((lo >> 16) & 0xff) as usize]
+            ^ t[4][(lo >> 24) as usize]
+            ^ t[3][(hi & 0xff) as usize]
+            ^ t[2][((hi >> 8) & 0xff) as usize]
+            ^ t[1][((hi >> 16) & 0xff) as usize]
+            ^ t[0][(hi >> 24) as usize];
+    }
+    for &b in chunks.remainder() {
+        crc = (crc >> 8) ^ t[0][((crc ^ b as u32) & 0xff) as usize];
+    }
+    !crc
+}
+
 /// Supported hash algorithms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -381,6 +422,27 @@ pub fn key16(p: &dyn KeyProvider, name: &str) -> Option<Zeroizing<[u8; 16]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crc32c_check_value() {
+        assert_eq!(crc32c(b"123456789"), 0xe306_9283);
+        assert_eq!(crc32c(b""), 0);
+        let long: Vec<u8> = (0..1000u32).map(|i| (i * 7) as u8).collect();
+        // Slicing-by-8 must agree with the bytewise definition at every split.
+        let bytewise = |d: &[u8]| {
+            let mut c = !0u32;
+            for &b in d {
+                c ^= b as u32;
+                for _ in 0..8 {
+                    c = if c & 1 != 0 { (c >> 1) ^ 0x82f6_3b78 } else { c >> 1 };
+                }
+            }
+            !c
+        };
+        for n in [1, 7, 8, 9, 63, 1000] {
+            assert_eq!(crc32c(&long[..n]), bytewise(&long[..n]));
+        }
+    }
 
     #[test]
     fn aes_known_answer() {

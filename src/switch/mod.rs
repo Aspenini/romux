@@ -1,7 +1,7 @@
 //! # `romux::switch`
 //!
-//! Nintendo Switch package formats (NSP, NSZ, XCI, XCZ, NCA, NCZ, PFS0, HFS0, RomFS) and
-//! operations. Most work goes through the generic API ([`crate::open`], [`crate::inspect`],
+//! Nintendo Switch package formats (NSP, NSZ, XCI, XCZ, NCA, NCZ, PFS0, HFS0, RomFS) and the
+//! decrypted Switch 1/2 archives NX and NUP, plus operations. Most work goes through the generic API ([`crate::open`], [`crate::inspect`],
 //! [`crate::plan_convert`]) with the [`SwitchBackend`]. Switch-specific operations have
 //! typed builders with `plan()` / `execute()`:
 //!
@@ -12,22 +12,28 @@
 //! | [`CompressBuilder`], [`DecompressBuilder`] | NSP/XCI ⇄ NSZ/XCZ (byte-identical) |
 //! | [`ConvertBuilder`], [`SplitBuilder`] | NSP ⇄ XCI; split a bundle into content sets |
 //! | [`RomfsBuilder`] | build a RomFS image |
+//! | [`ArchiveBuilder`] | NSP/NSZ/XCI/XCZ (+ updates, DLC) → decrypted NX or NUP archive |
 //!
 //! Low-level readers: [`pfs0`], [`hfs0`] and [`exefs`].
 //!
 //! Capability honesty: NCA internals are encrypted; operations that need keys say so with
-//! `NeedsKeyMaterial`. A rebuilt XCI is a gamecard-*style* container, never an authentic
+//! `NeedsKeyMaterial`. NX and NUP hold decrypted content: reading them never needs keys,
+//! producing them from retail packages always does. A rebuilt XCI is a gamecard-*style* container, never an authentic
 //! cartridge image, and rebuilt packages never carry new valid signatures.
 
 pub(crate) mod apply_update;
+pub(crate) mod archive;
 pub(crate) mod bktr;
 pub(crate) mod bundle;
 pub(crate) mod cnmt;
 pub(crate) mod convert;
 pub(crate) mod keys;
 pub(crate) mod nacp;
+pub(crate) mod native;
 pub(crate) mod nca;
 pub(crate) mod ncz;
+pub(crate) mod nup;
+pub(crate) mod nx;
 pub(crate) mod package;
 pub(crate) mod partition;
 pub(crate) mod reader;
@@ -66,9 +72,14 @@ pub mod formats {
     pub const SWITCH_PFS0: FormatId = FormatId("switch.pfs0");
     pub const SWITCH_HFS0: FormatId = FormatId("switch.hfs0");
     pub const SWITCH_ROMFS: FormatId = FormatId("switch.romfs");
+    /// NX archive of decrypted Switch 1/2 games (NXFormat binary 0.2/0.3).
+    pub const SWITCH_NX: FormatId = FormatId("switch.nx");
+    /// NUP v1 container of unencrypted Switch 1/2 game trees.
+    pub const SWITCH_NUP: FormatId = FormatId("switch.nup");
 }
 
 pub use apply_update::{ApplyUpdateBuilder, ApplyUpdatePlan, PatchStrategy};
+pub use archive::{ArchiveBuilder, ArchiveFormat, ArchivePlan};
 pub use bundle::{BundleBuilder, PackageFormat, PackagePlan};
 pub use convert::{CompressBuilder, ConvertBuilder, DecompressBuilder, SplitBuilder, SplitPlan};
 pub use formats::*;
@@ -199,6 +210,48 @@ pub(crate) fn descriptors() -> Vec<FormatDescriptor> {
             .op(Extract, Supported, "")
             .op(Verify, Supported, "per-entry SHA-256 of hashed regions")
             .op(Repack, Supported, "library API: hfs0::write"),
+        FormatDescriptor::new(
+            SWITCH_NX,
+            Platform::Switch,
+            "NX",
+            &["nx"],
+            "archive of decrypted Switch 1/2 games: base, updates and DLC as complete snapshots over deduplicated blocks",
+        )
+        .op(Probe, Supported, "NXAR magic and header CRC-32C (slot A or B)")
+        .op(Inspect, Supported, "applications, programs, snapshots, display metadata; no keys needed")
+        .op(List, Supported, "snapshot trees (DNCA units), metadata media, source resources")
+        .op(Extract, Supported, "snapshot files, every read CRC-32C checked")
+        .op(Verify, Supported, "header CRC, section SHA-256, layout, snapshot identities; content: every block slice and file SHA-256")
+        .op_req(
+            Convert,
+            Conditional,
+            "built from NSP/NSZ/XCI/XCZ by decrypting every NCA (keys); updates need their base among the inputs",
+            vec![key("header_key"), key("key_area_key_application_XX"), key("titlekek_XX")],
+        )
+        .op_req(Bundle, Conditional, "switch bundle --format nx: base + updates + DLC in one archive", vec![key("header_key")])
+        .op(Repack, Unsupported, "rebuild recipes and in-place edits are not offered")
+        .op(Scan, Supported, "grouped by application ID"),
+        FormatDescriptor::new(
+            SWITCH_NUP,
+            Platform::Switch,
+            "NUP",
+            &["nup"],
+            "container of unencrypted Switch 1/2 ExeFS/RomFS trees (base, updates, add-ons)",
+        )
+        .op(Probe, Supported, "NUP magic (major version 1)")
+        .op(Inspect, Supported, "packages, title IDs, versions and metadata TLVs; no keys needed")
+        .op(List, Supported, "package trees")
+        .op(Extract, Supported, "files (zstd extents decoded)")
+        .op(Verify, Supported, "superblock, TOC SHA-256, tree structure, UUID; content: per-file SHA-256")
+        .op_req(
+            Convert,
+            Conditional,
+            "built from NSP/NSZ/XCI/XCZ by decrypting and extracting ExeFS/RomFS (keys); BKTR updates applied to their base",
+            vec![key("header_key"), key("key_area_key_application_XX"), key("titlekek_XX")],
+        )
+        .op_req(Bundle, Conditional, "switch bundle --format nup: one game's base + updates + add-ons", vec![key("header_key")])
+        .op(Repack, Unsupported, "packing loose dump folders is not offered")
+        .op(Scan, Supported, "grouped by title ID"),
         FormatDescriptor::new(SWITCH_ROMFS, Platform::Switch, "RomFS", &["romfs"], "level-3 RomFS image (as extracted from an NCA)")
             .op(Probe, Supported, "header layout heuristics (low confidence)")
             .op(Inspect, Supported, "")
@@ -218,7 +271,7 @@ pub(crate) fn capabilities_for(f: FormatId) -> CapabilitySet {
 fn conversions() -> Vec<ConversionEdge> {
     use OutputGuarantee::*;
     let z = if cfg!(feature = "zstd") { Support::Conditional } else { Support::Unsupported };
-    vec![
+    let mut edges = vec![
         ConversionEdge::new(
             SWITCH_XCI,
             SWITCH_NSP,
@@ -268,7 +321,32 @@ fn conversions() -> Vec<ConversionEdge> {
             .guarantees(&[ContainerValid, ContentPreserved]),
         ConversionEdge::new(SWITCH_NCA, SWITCH_NCZ, ConversionKind::Compress, z, "requires keys").guarantees(&[ByteIdenticalRoundTrip]),
         ConversionEdge::new(SWITCH_NCZ, SWITCH_NCA, ConversionKind::Decompress, z, "no keys needed").guarantees(&[ByteIdenticalRoundTrip]),
-    ]
+    ];
+    for from in [SWITCH_NSP, SWITCH_NSZ, SWITCH_XCI, SWITCH_XCZ] {
+        edges.push(
+            ConversionEdge::new(
+                from,
+                SWITCH_NX,
+                ConversionKind::Rebuild,
+                Support::Conditional,
+                "every NCA decrypted to a DNCA unit; keys required",
+            )
+            .guarantees(&[ContentPreserved, Decrypted, DerivedArtifact, NotAuthentic, CompatibilityUnverified])
+            .requires(Requirement::KeyMaterial("header_key".into())),
+        );
+        edges.push(
+            ConversionEdge::new(
+                from,
+                SWITCH_NUP,
+                ConversionKind::Rebuild,
+                Support::Conditional,
+                "ExeFS/RomFS extracted and decrypted; keys required",
+            )
+            .guarantees(&[Decrypted, DerivedArtifact, LayoutNotPreserved, NotAuthentic, CompatibilityUnverified])
+            .requires(Requirement::KeyMaterial("header_key".into())),
+        );
+    }
+    edges
 }
 
 impl SwitchBackend {
@@ -297,6 +375,28 @@ impl Backend for SwitchBackend {
         let mut m = [0u8; 4];
         if len >= 0x10 {
             s.read_exact_at(0, &mut m)?;
+        }
+        if nx::probe(s) {
+            let mut ev = ProbeEvidence::new(SWITCH_NX, Confidence::Medium).matched("NXAR magic");
+            let mut h = vec![0u8; 256];
+            let valid = [0u64, 4096].iter().any(|&at| {
+                len >= at + 256
+                    && s.read_exact_at(at, &mut h).is_ok()
+                    && &h[..4] == nx::MAGIC
+                    && crate::crypto::crc32c(&h[..252]) == u32::from_le_bytes([h[252], h[253], h[254], h[255]])
+            });
+            if valid {
+                ev.confidence = Confidence::Certain;
+                ev = ev.matched("header slot CRC-32C valid");
+            } else {
+                ev = ev.warn("no header slot has a valid CRC-32C");
+            }
+            out.push(ev.specificity(3));
+            return Ok(out);
+        }
+        if nup::probe(s) {
+            out.push(ProbeEvidence::new(SWITCH_NUP, Confidence::High).matched("NUP magic (major version 1)").specificity(3));
+            return Ok(out);
         }
         let limits = crate::ResourceLimits { max_metadata: l.max_read, ..Default::default() };
         if &m == b"PFS0" {
@@ -348,6 +448,8 @@ impl Backend for SwitchBackend {
             s.read_exact_at(0x200, &mut magic)?;
             if matches!(&magic, b"NCA3" | b"NCA2") {
                 out.push(ProbeEvidence::new(SWITCH_NCA, Confidence::High).matched("plaintext NCA header magic"));
+            } else if &magic == nca::DNCA_MAGIC {
+                out.push(ProbeEvidence::new(SWITCH_NCA, Confidence::High).matched("decrypted NCA (DNCA) header magic"));
             } else if len % 0x200 == 0 {
                 let ext = s.identity().path.and_then(|p| p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()));
                 if ext.as_deref() == Some("nca") {
@@ -371,11 +473,20 @@ impl Backend for SwitchBackend {
             SWITCH_NCA | SWITCH_NCZ => Ok(Box::new(reader::NcaReader::open(source, format, ctx)?)),
             SWITCH_PFS0 | SWITCH_HFS0 => Ok(Box::new(reader::PartitionReader::open(source, format, ctx)?)),
             SWITCH_ROMFS => Ok(Box::new(reader::RomfsReader::open(source, ctx)?)),
+            SWITCH_NX => Ok(Box::new(nx::NxReader::open(source, ctx)?)),
+            SWITCH_NUP => Ok(Box::new(nup::NupReader::open(source, ctx)?)),
             _ => Err(Error::unsupported(format!("switch backend cannot open {format}"))),
         }
     }
 
     fn plan_convert(&self, req: ConvertRequest) -> Result<Box<dyn PlannedOperation>> {
+        if let Some(fmt) = ArchiveFormat::from_format_id(req.to) {
+            let mut b = ArchiveBuilder::new(fmt).input(&req.input).context(req.ctx.clone());
+            if let Some(l) = req.option_u64("level")? {
+                b = b.level(l as i32);
+            }
+            return Ok(b.plan()?.into_planned(req.output));
+        }
         let level = req.option_u64("level")?.map(|v| v as i32).unwrap_or(18);
         let block = req.option_u64("block")?.map(|v| v as u8);
         if req.from == SWITCH_NCA || req.from == SWITCH_NCZ {
@@ -399,6 +510,9 @@ impl Backend for SwitchBackend {
 
 #[cfg(test)]
 pub(crate) mod tests_ops;
+
+#[cfg(test)]
+mod tests_archive;
 
 /// Synthetic fixtures and internal writers used by the test suites (feature `testkit`;
 /// not a stable API).

@@ -43,6 +43,18 @@ test = false
 doc = false
 
 [[bin]]
+name = "nx"
+path = "fuzz_targets/nx.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "nup"
+path = "fuzz_targets/nup.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "nsp"
 path = "fuzz_targets/nsp.rs"
 test = false

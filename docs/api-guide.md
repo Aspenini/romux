@@ -1,6 +1,6 @@
 # API guide
 
-All examples assume `romux = { version = "0.1", features = [...] }`.
+All examples assume `romux = { version = "0.2", features = [...] }`.
 
 ## Open, probe, inspect
 
@@ -108,7 +108,7 @@ let job = romux::JobContext::new().with_progress(std::sync::Arc::new(Bar)).with_
 ## Using a single platform
 
 ```toml
-romux = { version = "0.1", default-features = false, features = ["xbox"] }
+romux = { version = "0.2", default-features = false, features = ["xbox"] }
 ```
 
 This compiles only the `xbox` module plus the shared core.

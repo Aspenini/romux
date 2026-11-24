@@ -32,6 +32,8 @@ A listed console does not imply that every operation works for every encrypted r
 | `switch.ncz` | switch | supported | supported | supported | supported | supported | unsupported | unsupported | unsupported | unsupported | conditional | unsupported | unsupported | unsupported |
 | `switch.nsp` | switch | supported | supported | supported | supported | supported | conditional | conditional | conditional | conditional | unsupported | conditional | unsupported | supported |
 | `switch.nsz` | switch | supported | supported | supported | supported | supported | conditional | conditional | conditional | unsupported | conditional | conditional | unsupported | supported |
+| `switch.nup` | switch | supported | supported | supported | supported | supported | conditional | unsupported | conditional | unsupported | unsupported | unsupported | unsupported | supported |
+| `switch.nx` | switch | supported | supported | supported | supported | supported | conditional | unsupported | conditional | unsupported | unsupported | unsupported | unsupported | supported |
 | `switch.pfs0` | switch | supported | supported | supported | supported | supported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | supported | unsupported |
 | `switch.romfs` | switch | supported | supported | supported | supported | supported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | supported | unsupported |
 | `switch.xci` | switch | supported | supported | supported | supported | supported | conditional | conditional | conditional | conditional | unsupported | conditional | unsupported | supported |
@@ -373,6 +375,34 @@ NSP whose NCAs are stored as NCZ. Extensions: `.nsz`.
 - **decompress**: conditional — restores every NCA byte-identically (content IDs re-verified); no keys needed Requires: Codec("zstd").
 - **compress**: unsupported — already compressed
 
+### `switch.nup` — NUP
+
+container of unencrypted Switch 1/2 ExeFS/RomFS trees (base, updates, add-ons). Extensions: `.nup`.
+
+- **probe**: supported — NUP magic (major version 1)
+- **inspect**: supported — packages, title IDs, versions and metadata TLVs; no keys needed
+- **list**: supported — package trees
+- **extract**: supported — files (zstd extents decoded)
+- **verify**: supported — superblock, TOC SHA-256, tree structure, UUID; content: per-file SHA-256
+- **convert**: conditional — built from NSP/NSZ/XCI/XCZ by decrypting and extracting ExeFS/RomFS (keys); BKTR updates applied to their base Requires: KeyMaterial("header_key"), KeyMaterial("key_area_key_application_XX"), KeyMaterial("titlekek_XX").
+- **bundle**: conditional — switch bundle --format nup: one game's base + updates + add-ons Requires: KeyMaterial("header_key").
+- **repack**: unsupported — packing loose dump folders is not offered
+- **scan**: supported — grouped by title ID
+
+### `switch.nx` — NX
+
+archive of decrypted Switch 1/2 games: base, updates and DLC as complete snapshots over deduplicated blocks. Extensions: `.nx`.
+
+- **probe**: supported — NXAR magic and header CRC-32C (slot A or B)
+- **inspect**: supported — applications, programs, snapshots, display metadata; no keys needed
+- **list**: supported — snapshot trees (DNCA units), metadata media, source resources
+- **extract**: supported — snapshot files, every read CRC-32C checked
+- **verify**: supported — header CRC, section SHA-256, layout, snapshot identities; content: every block slice and file SHA-256
+- **convert**: conditional — built from NSP/NSZ/XCI/XCZ by decrypting every NCA (keys); updates need their base among the inputs Requires: KeyMaterial("header_key"), KeyMaterial("key_area_key_application_XX"), KeyMaterial("titlekek_XX").
+- **bundle**: conditional — switch bundle --format nx: base + updates + DLC in one archive Requires: KeyMaterial("header_key").
+- **repack**: unsupported — rebuild recipes and in-place edits are not offered
+- **scan**: supported — grouped by application ID
+
 ### `switch.pfs0` — PFS0
 
 bare partition filesystem (e.g. ExeFS). Extensions: `.pfs0`, `.exefs`.
@@ -642,6 +672,14 @@ Xbox 360 filesystem-only XDVDFS image. Extensions: `.iso`, `.xiso`.
 | `switch.xcz` | `switch.nsp` | Decompress | conditional | container structurally valid; content preserved | decompress + container change |
 | `switch.nca` | `switch.ncz` | Compress | conditional | byte-identical round trip | requires keys |
 | `switch.ncz` | `switch.nca` | Decompress | conditional | byte-identical round trip | no keys needed |
+| `switch.nsp` | `switch.nx` | Rebuild | conditional | content preserved; contains decrypted data; derived artifact; rebuilt container; not an authentic signed original; compatibility with consuming software not verified | every NCA decrypted to a DNCA unit; keys required |
+| `switch.nsp` | `switch.nup` | Rebuild | conditional | contains decrypted data; derived artifact; original layout/filler not preserved; rebuilt container; not an authentic signed original; compatibility with consuming software not verified | ExeFS/RomFS extracted and decrypted; keys required |
+| `switch.nsz` | `switch.nx` | Rebuild | conditional | content preserved; contains decrypted data; derived artifact; rebuilt container; not an authentic signed original; compatibility with consuming software not verified | every NCA decrypted to a DNCA unit; keys required |
+| `switch.nsz` | `switch.nup` | Rebuild | conditional | contains decrypted data; derived artifact; original layout/filler not preserved; rebuilt container; not an authentic signed original; compatibility with consuming software not verified | ExeFS/RomFS extracted and decrypted; keys required |
+| `switch.xci` | `switch.nx` | Rebuild | conditional | content preserved; contains decrypted data; derived artifact; rebuilt container; not an authentic signed original; compatibility with consuming software not verified | every NCA decrypted to a DNCA unit; keys required |
+| `switch.xci` | `switch.nup` | Rebuild | conditional | contains decrypted data; derived artifact; original layout/filler not preserved; rebuilt container; not an authentic signed original; compatibility with consuming software not verified | ExeFS/RomFS extracted and decrypted; keys required |
+| `switch.xcz` | `switch.nx` | Rebuild | conditional | content preserved; contains decrypted data; derived artifact; rebuilt container; not an authentic signed original; compatibility with consuming software not verified | every NCA decrypted to a DNCA unit; keys required |
+| `switch.xcz` | `switch.nup` | Rebuild | conditional | contains decrypted data; derived artifact; original layout/filler not preserved; rebuilt container; not an authentic signed original; compatibility with consuming software not verified | ExeFS/RomFS extracted and decrypted; keys required |
 | `3ds.cci` | `3ds.cia` | Rebuild | conditional | content preserved; rebuilt container; not an authentic signed original; modified; original signatures invalidated; compatibility with consuming software not verified | NoCrypto (or key-decrypted) partitions become plaintext CIA contents; zero signatures |
 | `gamecube.iso` | `wii.rvz` | Compress | supported | byte-identical round trip; container structurally valid | zstd groups with junk packing, verified by read-back |
 | `wii.rvz` | `gamecube.iso` | Decompress | conditional | byte-identical round trip | GameCube RVZ only |

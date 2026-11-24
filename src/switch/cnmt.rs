@@ -81,6 +81,8 @@ pub struct Cnmt {
     pub related_id: Option<u64>,
     pub required_system_version: Option<u32>,
     pub required_application_version: Option<u32>,
+    /// Platform byte at 0x0D of the binary header: 0 = Switch 1, 1 = Switch 2.
+    pub platform: u8,
     pub contents: Vec<ContentRecord>,
     /// Source: "cnmt" (binary) or "cnmt.xml".
     pub evidence: &'static str,
@@ -125,6 +127,7 @@ impl Cnmt {
             related_id,
             required_system_version: rsv,
             required_application_version: rav,
+            platform: b[13],
             contents,
             evidence: "cnmt",
         })
@@ -170,6 +173,7 @@ impl Cnmt {
             related_id,
             required_system_version: tag(top, "RequiredSystemVersion").and_then(|v| v.trim().parse().ok()),
             required_application_version: tag(top, "RequiredApplicationVersion").and_then(|v| v.trim().parse().ok()),
+            platform: 0,
             contents,
             evidence: "cnmt.xml",
         })

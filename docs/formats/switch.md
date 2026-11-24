@@ -1,8 +1,9 @@
 # Nintendo Switch formats
 
-Public references: Switchbrew NCA and Gamecard pages, and the NSZ format notes (see the
-specification's Appendix A). These notes describe structures only. No implementation code
-was copied.
+Public references: Switchbrew NCA and Gamecard pages, the NSZ format notes (see the
+specification's Appendix A), the NX binary specification (NXFormat `docs/SPEC.md`, release
+1.0.4) and the NUP v1 specification (`SPEC.md` of the NUP project). These notes describe
+structures only. No implementation code was copied.
 
 ## PFS0 (`switch.pfs0`, the basis of NSP/NSZ)
 - Header (LE): `PFS0`, u32 entry count, u32 string-table size, u32 reserved.
@@ -80,3 +81,58 @@ was copied.
 - **Tested variants:** synthetic indirect tables and CTR-EX subsections, plus a full
   replacement update. Compatibility with real retail updates has not been recorded yet; see
   `docs/compatibility.md`.
+
+## DNCA (decrypted NCA)
+- An NCA whose header is stored in plaintext with the marker `DNCA` at 0x200 (instead of
+  `NCA3`), every section decrypted in place and declared as encryption type 1 (none), and
+  each FS-header SHA-256 at 0x280 recomputed. Sizes, offsets, hash trees and BKTR tables are
+  unchanged. DNSP/DXCI packages and NX archives carry DNCA units.
+- Romux reads a DNCA without keys (it probes as `switch.nca`). It writes DNCA units when it
+  builds an NX archive. AES-CTR-EX sections also decrypt their trailing BKTR tables with the
+  section's plain counter. Sections with sparse storage are rejected.
+
+## NX (`switch.nx`)
+- Decrypted Switch 1/2 games in one file: each base, update and DLC is a complete
+  *snapshot* (a file tree) over a pool of independent RAW or Zstandard blocks of at most
+  1 MiB, deduplicated by byte comparison across files and snapshots.
+- Layout: header slot A at 0 and slot B at 4096 (256 bytes each, CRC-32C, generation), the
+  Data region at 8192, then one tail: Media (icons, NACP, NPDM), Catalog (applications,
+  programs, snapshots, localized entries, dependencies, extensions, string pool), Manifest
+  (directories, entries, files, block references, path pool), the hot block index and the
+  integrity table (one CRC-32C per 16 KiB slice of uncompressed block data). Catalog,
+  Manifest and index are covered by SHA-256 digests in the header.
+- The reader accepts binary versions 0.2 and 0.3 (Source Resources), selects the valid slot
+  with the highest generation, validates every table range, sort order, reference and
+  reserved field it relies on, and rejects unknown required extensions. Every file read is
+  checked against its slice CRCs. `verify --level content` decodes every block and recomputes
+  every file SHA-256 and snapshot identity.
+- Listing paths: `<application id>/<type>-v<version>/<file>` (types `base`, `update`,
+  `dlc-<id>`), `<application id>/metadata/` (control.nacp and icons per language),
+  `<application id>/source-resources/<n>/` and `extra/`.
+- The writer produces compact generation-0 archives of version 0.2 from NSP/NSZ/XCI/XCZ: one
+  snapshot per CNMT, holding the content set's NCAs as DNCA units (`<id>.nca`,
+  `<id>.cnmt.nca`). An update snapshot also contains its base units (complete view) and a
+  required-base dependency; DLC names the oldest base/update it requires. Display metadata
+  comes from the newest Control data (other versions in the Snapshot Metadata History
+  extension); CNMT required system versions go to Snapshot Native Metadata. Blocks are
+  256 KiB chunks, zstd level 3 by default, kept only when they save 25 %.
+- Not written: rebuild recipes (`0x00010006`), Source Resources, Switch 2 content (reported
+  as unverified), in-place edits.
+
+## NUP (`switch.nup`)
+- Unencrypted Switch 1/2 ExeFS files and complete RomFS trees for one game: a 0x80-byte
+  superblock (`NUP\x01`), a SHA-256-protected TOC (0x40-byte package records, 0x18-byte
+  directories, 0x50-byte files, a flat child-slot array and a string pool), then 16-byte
+  aligned extents (raw or one zstd frame with the content size) and per-package TLV meta
+  blocks. Identical files share one extent.
+- Package kinds: base, update (flag `standalone_update` without a base), add-on.
+- The reader validates the superblock, TOC digest, every range, codec and kind, tree
+  names and cycles, and the localized TLV records. `verify --level content` recomputes
+  every file SHA-256 once per extent.
+- Listing paths: `base/…`, `update-v<version>/…`, `addon-<title id>/…`.
+- The writer extracts the primary Program's `exefs/` and `romfs/` per title. An update
+  package holds the complete updated tree (BKTR applied to the base RomFS, so the base must
+  be among the inputs). Meta TLVs: NPDM, build ID (NSO ModuleId), NACP and display version
+  per package; title, publisher, icon and localized titles/icons from the newest Control
+  data on the base package; the input file name as provenance.
+- RomFS sections using compressed or sparse storage are not extracted yet.

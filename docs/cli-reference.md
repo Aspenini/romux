@@ -40,13 +40,16 @@ segments. A pattern without a `/` also matches basenames.
 
 ```text
 romux switch inspect|extract|verify ...
-romux switch bundle <base> [--update <path>]... [--dlc <path>]... --format nsp|xci|nsz|xcz --output <path>
-                    [--convert-rights] [--allow-unverified]
+romux switch bundle <base> [--update <path>]... [--dlc <path>]... --format nsp|xci|nsz|xcz|nx|nup --output <path>
+                    [--convert-rights] [--allow-unverified] [--level N]
 romux switch apply-update <base> <update> --output <dir>
 romux switch split <bundle> --output <dir>
-romux switch convert <input> --format nsp|xci|nsz|xcz --output <path> [--convert-rights]
+romux switch convert <input> --format nsp|xci|nsz|xcz|nx|nup --output <path> [--convert-rights] [--level N]
 romux switch compress <input> [--format nsz|xcz] --output <path> [--level 18] [--block N] [--min-size BYTES]
 romux switch decompress <input> --output <path>
+
+  (nx and nup decrypt the content with --key-file keys; --level sets zstd, default 3, 0 = raw.
+   NX takes several games; NUP takes one game, and an update needs its base among the inputs.)
 
 romux ps4  inspect|extract|verify <game.pkg> ...
 romux 3ds  inspect|extract|verify|convert ...           (convert --format cia: unsigned CIA from NoCrypto CCI)

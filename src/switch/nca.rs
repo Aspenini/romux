@@ -207,6 +207,15 @@ impl FsHeader {
         let (_, size, hdr) = self.indirect_table();
         size > 0 && &hdr[..4] == b"BKTR"
     }
+    /// Sparse-storage info (FS header 0x148..0x178) is present: the stored section is a
+    /// relocated subset of a larger virtual storage.
+    pub fn has_sparse_info(&self) -> bool {
+        self.raw[0x148..0x178].iter().any(|&b| b != 0)
+    }
+    /// Compressed-storage info (FS header 0x178..0x1A0) is present.
+    pub fn has_compression_info(&self) -> bool {
+        self.raw[0x178..0x1A0].iter().any(|&b| b != 0)
+    }
 }
 
 /// A decrypted NCA header.
@@ -241,8 +250,13 @@ impl std::fmt::Debug for NcaHeader {
 }
 
 fn has_magic(b: &[u8]) -> bool {
-    matches!(&b[0x200..0x204], b"NCA3" | b"NCA2" | b"NCA0")
+    matches!(&b[0x200..0x204], b"NCA3" | b"NCA2" | b"NCA0" | b"DNCA")
 }
+
+/// Header marker of a decrypted NCA ("DNCA"): plaintext header, every section declares
+/// encryption type 1 (none) and its FS-header hash is recomputed. Used by DNSP/DXCI
+/// packages and NX archives.
+pub const DNCA_MAGIC: &[u8; 4] = b"DNCA";
 
 impl NcaHeader {
     /// Decrypt (or accept a plaintext) 0xC00-byte header.
@@ -321,6 +335,10 @@ impl NcaHeader {
     }
     pub fn has_rights_id(&self) -> bool {
         self.rights_id != [0u8; 16]
+    }
+    /// The header carries the decrypted-content (DNCA) marker.
+    pub fn is_dnca(&self) -> bool {
+        &self.magic == DNCA_MAGIC
     }
     pub fn rights_id_hex(&self) -> String {
         hex(&self.rights_id)
@@ -572,6 +590,78 @@ impl Nca {
                 Ok(Arc::new(CtrSource::new(self.source.clone(), s.start, len, &k.ctr, s.ctr_upper())?.with_subsections(subs)))
             }
             EncryptionType::Unknown => Err(Error::unsupported(format!("NCA section {index} uses an unknown encryption type"))),
+        }
+    }
+
+    /// The whole NCA as a decrypted NCA ("DNCA"): plaintext header with the `DNCA` marker,
+    /// every section decrypted in place and declared as encryption type 1 with a recomputed
+    /// FS-header hash. Sizes and offsets are unchanged, so section tables, hash trees and
+    /// BKTR patch tables keep their meaning. Bytes outside sections are copied as stored.
+    ///
+    /// Sparse sections (relocated storage) are rejected: decrypting them needs the virtual
+    /// layout, which this view does not rebuild.
+    pub fn dnca_view(&self) -> Result<SharedSource> {
+        let total = self.source.len()?;
+        if self.header.content_size != total {
+            return Err(Error::malformed(format!("NCA header size {} differs from the stored size {total}", self.header.content_size)));
+        }
+        let mut header = self.header.raw.to_vec();
+        header[0x200..0x204].copy_from_slice(DNCA_MAGIC);
+        let mut sections: Vec<&FsHeader> = self.header.sections.iter().collect();
+        sections.sort_by_key(|s| s.start);
+        for s in &sections {
+            if s.has_sparse_info() {
+                return Err(Error::unsupported(format!(
+                    "NCA section {} uses sparse storage; decrypting it into a DNCA is not supported",
+                    s.index
+                )));
+            }
+            if s.start < HEADER_SIZE as u64 || s.end > total {
+                return Err(Error::bounds(format!("NCA section {} range is invalid", s.index)));
+            }
+            let o = 0x400 + s.index * 0x200;
+            header[o + 4] = 1;
+            let h = crate::crypto::sha256(&header[o..o + 0x200]);
+            header[0x280 + s.index * 32..0x2A0 + s.index * 32].copy_from_slice(&h);
+        }
+        for w in sections.windows(2) {
+            if w[1].start < w[0].end {
+                return Err(Error::malformed("NCA sections overlap"));
+            }
+        }
+        let mut parts: Vec<SharedSource> = vec![Arc::new(crate::MemorySource::new(header))];
+        let mut at = HEADER_SIZE as u64;
+        for s in &sections {
+            if s.start > at {
+                parts.push(crate::SubSource::shared(self.source.clone(), at, s.start - at)?);
+            }
+            parts.push(self.dnca_section(s)?);
+            at = s.end;
+        }
+        if total > at {
+            parts.push(crate::SubSource::shared(self.source.clone(), at, total - at)?);
+        }
+        Ok(Arc::new(crate::ConcatSource::new(parts)?))
+    }
+
+    /// Decrypted bytes of one whole section as stored (AES-CTR-EX sections also decrypt
+    /// their trailing BKTR tables, which use the section's plain counter).
+    fn dnca_section(&self, s: &FsHeader) -> Result<SharedSource> {
+        match s.encryption() {
+            EncryptionType::AesCtrEx | EncryptionType::AesCtrExSkipLayerHash => {
+                let k = self.need_keys()?;
+                let mut subs = self.ctr_ex_subsections(s)?;
+                let (ind_off, ind_size, _) = s.indirect_table();
+                let (ex_off, ex_size, _) = s.aes_ctr_ex_table();
+                let tables =
+                    [(ind_off, ind_size), (ex_off, ex_size)].iter().filter(|(_, n)| *n > 0).map(|(o, _)| *o).min().unwrap_or(s.size());
+                let upper = s.ctr_upper();
+                let plain_gen = u32::from_be_bytes([upper[4], upper[5], upper[6], upper[7]]);
+                subs.retain(|(o, _)| *o < tables);
+                subs.push((tables, plain_gen));
+                Ok(Arc::new(CtrSource::new(self.source.clone(), s.start, s.size(), &k.ctr, upper)?.with_subsections(subs)))
+            }
+            _ => self.section(s.index),
         }
     }
 

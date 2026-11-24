@@ -23,6 +23,8 @@ its content.
 | Switch | read NCA headers (titles, versions, CNMT, split, bundle validation) | `header_key` |
 | Switch | decrypt sections (list/extract NCA files, compress to NCZ, apply-update) | `key_area_key_{application,ocean,system}_XX` |
 | Switch | rights-ID titles (title keys from common tickets) | `titlekek_XX` |
+| Switch | build NX / NUP archives from NSP/NSZ/XCI/XCZ (decrypts every NCA) | `header_key`, `key_area_key_application_XX`, and `titlekek_XX` for rights-ID titles |
+| Switch | read, list, extract or verify NX / NUP archives and DNCA units | none (the content is already decrypted) |
 | Wii / vWii | partition data, WAD contents, Wii ISO/WBFS → RVZ | `wii_common_key`, `wii_korean_key`, `vwii_common_key` |
 | 3DS | CIA content title keys | `ctr_common_key_<n>` (normal key) |
 | 3DS | encrypted NCCH (exheader, ExeFS, RomFS) | `slot0x2CKeyX`, plus `slot0x25KeyX` / `slot0x18KeyX` / `slot0x1BKeyX` for titles that use those crypto methods, and `generator` (the key-scrambler constant) |

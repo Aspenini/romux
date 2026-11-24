@@ -300,15 +300,20 @@ enum SwitchCmd {
         #[arg(long, value_enum, default_value_t = Level::Content)]
         level: Level,
     },
-    /// Keep base, update and DLC as separate content sets in one container.
+    /// Keep base, update and DLC as separate content sets in one container
+    /// (nsp, xci, nsz, xcz), or decrypt them into one NX / NUP archive (nx, nup; keys required).
     Bundle {
         base: PathBuf,
         #[arg(long)]
         update: Vec<PathBuf>,
         #[arg(long)]
         dlc: Vec<PathBuf>,
+        /// nsp, xci, nsz, xcz, nx or nup.
         #[arg(long, default_value = "nsp")]
         format: String,
+        /// Zstandard level for nx/nup (default 3; 0 stores uncompressed).
+        #[arg(long)]
+        level: Option<i32>,
         #[arg(long, short)]
         output: PathBuf,
         /// Rewrite rights-ID NCA headers to standard crypto for XCI/XCZ (signatures become invalid).
@@ -331,15 +336,19 @@ enum SwitchCmd {
         #[arg(long, short)]
         output: PathBuf,
     },
-    /// NSP ⇄ XCI, NSZ ⇄ XCZ.
+    /// NSP ⇄ XCI, NSZ ⇄ XCZ, or any of them → decrypted NX / NUP (nx, nup; keys required).
     Convert {
         input: PathBuf,
+        /// nsp, xci, nsz, xcz, nx or nup.
         #[arg(long)]
         format: String,
         #[arg(long, short)]
         output: PathBuf,
         #[arg(long)]
         convert_rights: bool,
+        /// Zstandard level for nx/nup (default 3; 0 stores uncompressed).
+        #[arg(long)]
+        level: Option<i32>,
     },
     /// NSP→NSZ, XCI→XCZ.
     Compress {
@@ -672,7 +681,18 @@ impl App {
             SwitchCmd::Inspect(a) => self.inspect(a, Some(romux::Platform::Switch)),
             SwitchCmd::Extract(a) => self.extract(a, Some(romux::Platform::Switch)),
             SwitchCmd::Verify { input, level } => self.verify(input, *level, None, Some(romux::Platform::Switch)),
-            SwitchCmd::Bundle { base, update, dlc, format, output, convert_rights, allow_unverified } => {
+            SwitchCmd::Bundle { base, update, dlc, format, output, level, .. } if ArchiveFormat::parse(format).is_some() => {
+                let mut b =
+                    ArchiveBuilder::new(ArchiveFormat::parse(format).unwrap_or(ArchiveFormat::Nx)).input(base).context(self.ctx.clone());
+                for p in update.iter().chain(dlc) {
+                    b = b.input(p);
+                }
+                if let Some(l) = level {
+                    b = b.level(*l);
+                }
+                self.run_plan("bundle", b.plan()?.into_planned(output.clone()))
+            }
+            SwitchCmd::Bundle { base, update, dlc, format, output, convert_rights, allow_unverified, .. } => {
                 let mut b = BundleBuilder::new(base)
                     .output_format(PackageFormat::parse(format)?)
                     .context(self.ctx.clone())
@@ -694,7 +714,15 @@ impl App {
                 let plan = SplitBuilder::new(bundle).context(self.ctx.clone()).plan()?;
                 self.run_plan("split", Box::new(SplitAdapter(plan, output.clone())))
             }
-            SwitchCmd::Convert { input, format, output, convert_rights } => {
+            SwitchCmd::Convert { input, format, output, level, .. } if ArchiveFormat::parse(format).is_some() => {
+                let mut b =
+                    ArchiveBuilder::new(ArchiveFormat::parse(format).unwrap_or(ArchiveFormat::Nx)).input(input).context(self.ctx.clone());
+                if let Some(l) = level {
+                    b = b.level(*l);
+                }
+                self.run_plan("convert", b.plan()?.into_planned(output.clone()))
+            }
+            SwitchCmd::Convert { input, format, output, convert_rights, .. } => {
                 let plan = ConvertBuilder::new(input, PackageFormat::parse(format)?)
                     .convert_rights(*convert_rights)
                     .context(self.ctx.clone())

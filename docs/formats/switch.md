@@ -144,3 +144,8 @@ structures only. No implementation code was copied.
   `exefs/main`, and the folder name is recorded as provenance. Without a base package every
   update is flagged `standalone_update`. NX cannot be built from such folders, because
   they carry no CNMT or Control records to establish snapshot types and versions.
+- Scanning a dump reads only directory listings (sizes and timestamps from the directory
+  entries) and reports progress; each file is opened when it is packed and refused if its
+  size or timestamp changed since the scan. The output may not be written inside the dump
+  folder. Point the command at the folder that holds `base/` / `updates/` / `dlc/`: a bare
+  `updates/<version>/` folder is otherwise packed as a single base package.

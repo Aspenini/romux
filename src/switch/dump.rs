@@ -13,36 +13,137 @@
 //! Each package stores its whole folder tree. Title IDs come from `exefs/main.npdm` (ACI0
 //! program ID), the build ID from the NSO/NRO header of `exefs/main`. Dump-tool `.listing`
 //! files are excluded (NUP §6.3). Symbolic links are refused.
+//!
+//! Scanning reads only directory listings: sizes and timestamps come from the directory
+//! entries, and no file is opened until the writer reads it. A file is checked against
+//! its scanned size and timestamp when it is opened, so a dump that changes after planning
+//! is refused. Dumps routinely hold hundreds of thousands of files, and opening each one
+//! up front (with antivirus scanning every open) took minutes.
 
 use crate::switch::native::{Tree, TreeFile};
 use crate::switch::nup;
-use crate::{Error, ErrorCode, FileSource, Result, SharedSource};
+use crate::{DataSource, Error, ErrorCode, FileSource, Phase, ProgressEvent, ProgressSink, Result, SharedSource, SourceIdentity};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::UNIX_EPOCH;
 
 /// Reserved dump-tool artifacts (NUP §6.3).
 const ARTIFACTS: &[&str] = &[".listing"];
 
-/// A discovered dump: packages plus the opened files (re-checked before writing).
+/// A discovered dump: packages whose files are opened on first read.
 pub(crate) struct Dump {
     pub root: PathBuf,
     pub packages: Vec<nup::PackageInput>,
-    pub files: Vec<Arc<FileSource>>,
+    pub file_count: usize,
     pub warnings: Vec<String>,
 }
 
 impl Dump {
-    pub fn verify_unchanged(&self) -> Result<()> {
-        for f in &self.files {
-            f.verify_unchanged().map_err(|e| e.with_suggestion("the dump folder changed after planning; run the command again"))?;
+    pub fn logical_size(&self) -> u64 {
+        self.packages.iter().flat_map(|p| p.tree.files.iter()).map(|f| f.size).sum()
+    }
+
+    /// Refuse an output inside the dump folder: it could replace a dump file and would be
+    /// packed by the next run. One path resolution instead of one per dump file.
+    pub fn check_output(&self, output: &Path) -> Result<()> {
+        let root = std::fs::canonicalize(&self.root)?;
+        let abs = if output.is_absolute() { output.to_path_buf() } else { std::env::current_dir()?.join(output) };
+        let parent = abs.parent().map(Path::to_path_buf).unwrap_or_default();
+        // The parent may not exist yet; resolve the nearest existing ancestor.
+        let mut probe = parent.as_path();
+        let mut rest = Vec::new();
+        let resolved = loop {
+            match std::fs::canonicalize(probe) {
+                Ok(p) => break rest.iter().rev().fold(p, |acc: PathBuf, c: &&std::ffi::OsStr| acc.join(c)),
+                Err(_) => match (probe.parent(), probe.file_name()) {
+                    (Some(up), Some(name)) => {
+                        rest.push(name);
+                        probe = up;
+                    }
+                    _ => break parent.clone(),
+                },
+            }
+        };
+        if resolved.starts_with(&root) {
+            return Err(Error::conflict(format!("output {} is inside the dump folder {}", output.display(), self.root.display()))
+                .with_suggestion("write the .nup next to the dump folder instead"));
         }
         Ok(())
     }
-    pub fn file_paths(&self) -> Vec<PathBuf> {
-        self.files.iter().map(|f| f.path().to_path_buf()).collect()
+}
+
+fn modified_ns(m: &std::fs::Metadata) -> Option<u128> {
+    m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_nanos())
+}
+
+/// A dump file opened on first read and checked against the size and timestamp recorded
+/// while scanning.
+struct LazyFile {
+    path: PathBuf,
+    len: u64,
+    modified_ns: Option<u128>,
+    file: Mutex<Option<Arc<FileSource>>>,
+}
+
+impl LazyFile {
+    fn open(&self) -> Result<Arc<FileSource>> {
+        let mut slot = self.file.lock().map_err(|_| Error::internal("dump file state poisoned"))?;
+        if let Some(f) = slot.as_ref() {
+            return Ok(f.clone());
+        }
+        let f = Arc::new(FileSource::open(&self.path)?);
+        let id = f.identity();
+        if id.len != self.len || (self.modified_ns.is_some() && id.modified_ns != self.modified_ns) {
+            return Err(Error::conflict(format!("{} changed after the dump folder was scanned", self.path.display()))
+                .with_file(self.path.display().to_string())
+                .with_suggestion("run the command again"));
+        }
+        *slot = Some(f.clone());
+        Ok(f)
     }
-    pub fn logical_size(&self) -> u64 {
-        self.packages.iter().flat_map(|p| p.tree.files.iter()).map(|f| f.size).sum()
+}
+
+impl DataSource for LazyFile {
+    fn len(&self) -> Result<u64> {
+        Ok(self.len)
+    }
+    fn read_exact_at(&self, offset: u64, out: &mut [u8]) -> Result<()> {
+        crate::check_range(offset, out.len() as u64, self.len)?;
+        if out.is_empty() {
+            return Ok(());
+        }
+        self.open()?.read_exact_at(offset, out)
+    }
+    fn identity(&self) -> SourceIdentity {
+        SourceIdentity { path: Some(self.path.clone()), len: self.len, modified_ns: self.modified_ns }
+    }
+}
+
+/// Scan progress: bytes found so far, with the file count as the item.
+struct Scan<'a> {
+    sink: Option<&'a dyn ProgressSink>,
+    files: u64,
+    bytes: u64,
+}
+
+impl Scan<'_> {
+    fn found(&mut self, size: u64) {
+        self.files += 1;
+        self.bytes += size;
+        if self.files.is_multiple_of(512) {
+            self.report(false);
+        }
+    }
+    /// `last` reports a complete total so a terminal progress line is ended.
+    fn report(&self, last: bool) {
+        if let Some(s) = self.sink {
+            s.report(&ProgressEvent {
+                phase: Phase::Planning,
+                completed: self.bytes,
+                total: last.then_some(self.bytes),
+                item: Some(format!("{} files scanned", self.files)),
+            });
+        }
     }
 }
 
@@ -63,7 +164,7 @@ fn name_of(p: &Path) -> Result<String> {
 }
 
 /// Walk a package folder into a tree (sorted, artifacts skipped).
-fn walk(dir: &Path, rel: &str, tree: &mut Tree, opened: &mut Vec<Arc<FileSource>>, depth: u32) -> Result<()> {
+fn walk(dir: &Path, rel: &str, tree: &mut Tree, scan: &mut Scan<'_>, depth: u32) -> Result<()> {
     if depth > 64 {
         return Err(Error::limit(format!("{} is nested too deeply", dir.display())));
     }
@@ -80,15 +181,16 @@ fn walk(dir: &Path, rel: &str, tree: &mut Tree, opened: &mut Vec<Arc<FileSource>
         }
         if ft.is_dir() {
             tree.dirs.push(child.clone());
-            walk(&path, &child, tree, opened, depth + 1)?;
+            walk(&path, &child, tree, scan, depth + 1)?;
         } else if ft.is_file() {
             if ARTIFACTS.contains(&name.as_str()) {
                 continue;
             }
-            let f = Arc::new(FileSource::open(&path)?);
-            let size = crate::DataSource::len(f.as_ref())?;
-            let source: SharedSource = f.clone();
-            opened.push(f);
+            // Directory-entry metadata: no file handle (and no antivirus scan) per file.
+            let meta = e.metadata().map_err(|err| Error::from(err).with_file(path.display().to_string()))?;
+            let size = meta.len();
+            let source: SharedSource = Arc::new(LazyFile { path, len: size, modified_ns: modified_ns(&meta), file: Mutex::new(None) });
+            scan.found(size);
             tree.files.push(TreeFile { path: child, size, source });
         }
     }
@@ -143,7 +245,7 @@ fn read_head(tree: &Tree, path: &str, n: u64) -> Result<Option<Vec<u8>>> {
 }
 
 /// Discover the packages of a dump folder. `title_id` overrides the base title ID.
-pub(crate) fn discover(root: &Path, title_id: Option<u64>) -> Result<Dump> {
+pub(crate) fn discover(root: &Path, title_id: Option<u64>, progress: Option<&dyn ProgressSink>) -> Result<Dump> {
     if !root.is_dir() {
         return Err(Error::invalid_arg(format!("{} is not a directory", root.display())));
     }
@@ -211,11 +313,11 @@ pub(crate) fn discover(root: &Path, title_id: Option<u64>) -> Result<Dump> {
         ));
     }
     let label = name_of(root).unwrap_or_else(|_| "dump".into());
-    let mut files = Vec::new();
+    let mut scan = Scan { sink: progress, files: 0, bytes: 0 };
     let mut packages: Vec<nup::PackageInput> = Vec::new();
     for f in found {
         let mut tree = Tree::default();
-        walk(&f.dir, "", &mut tree, &mut files, 0)?;
+        walk(&f.dir, "", &mut tree, &mut scan, 0)?;
         let rel = f.dir.strip_prefix(root).map(|p| p.display().to_string()).unwrap_or_default();
         if tree.files.is_empty() {
             warnings.push(format!("{} skipped: it holds no files", if rel.is_empty() { "." } else { &rel }));
@@ -261,5 +363,6 @@ pub(crate) fn discover(root: &Path, title_id: Option<u64>) -> Result<Dump> {
     if packages.iter().any(|p| p.title_id == 0 && p.kind != nup::KIND_ADDON) {
         warnings.push("no exefs/main.npdm found; the title ID is recorded as 0 (pass a title ID to set it)".into());
     }
-    Ok(Dump { root: root.to_path_buf(), packages, files, warnings })
+    scan.report(true);
+    Ok(Dump { root: root.to_path_buf(), packages, file_count: scan.files as usize, warnings })
 }

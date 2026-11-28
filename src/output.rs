@@ -23,18 +23,15 @@ fn temp_name(target: &Path) -> PathBuf {
     target.with_file_name(tmp)
 }
 
-fn same_file(a: &Path, b: &Path) -> bool {
-    match (fs::canonicalize(a), fs::canonicalize(b)) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => false,
-    }
-}
-
 /// Refuse to write `target` if it is one of the inputs or exists without overwrite.
 pub fn check_output_target(target: &Path, policy: &IoPolicy, inputs: &[PathBuf]) -> Result<()> {
-    for i in inputs {
-        if same_file(i, target) {
-            return Err(Error::conflict(format!("output {} would overwrite an input file", target.display())));
+    // A target that does not exist cannot be an existing input; otherwise resolve the
+    // target once rather than once per input.
+    if let Ok(t) = fs::canonicalize(target) {
+        for i in inputs {
+            if fs::canonicalize(i).is_ok_and(|x| x == t) {
+                return Err(Error::conflict(format!("output {} would overwrite an input file", target.display())));
+            }
         }
     }
     match fs::symlink_metadata(target) {

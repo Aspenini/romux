@@ -75,6 +75,7 @@ pub struct ArchiveBuilder {
     ctx: OpenContext,
     level: Option<i32>,
     title_id: Option<u64>,
+    progress: Option<Arc<dyn crate::ProgressSink>>,
 }
 
 /// The validated plan.
@@ -92,7 +93,7 @@ pub struct ArchivePlan {
 
 impl ArchiveBuilder {
     pub fn new(format: ArchiveFormat) -> Self {
-        ArchiveBuilder { inputs: Vec::new(), format, ctx: OpenContext::default(), level: None, title_id: None }
+        ArchiveBuilder { inputs: Vec::new(), format, ctx: OpenContext::default(), level: None, title_id: None, progress: None }
     }
     /// Add an input package (base, update, DLC or a bundle; roles come from its CNMTs), or,
     /// for NUP, one already-decrypted dump folder.
@@ -111,6 +112,11 @@ impl ArchiveBuilder {
     /// Zstandard level (default 3; `0` stores everything uncompressed).
     pub fn level(mut self, l: i32) -> Self {
         self.level = Some(l);
+        self
+    }
+    /// Progress while planning (scanning a dump folder can take a while).
+    pub fn progress(mut self, sink: Arc<dyn crate::ProgressSink>) -> Self {
+        self.progress = Some(sink);
         self
     }
     /// Dump folders only: the base title ID, overriding the one read from `main.npdm`.
@@ -174,7 +180,7 @@ impl ArchiveBuilder {
                 "an extracted dump folder has no CNMT or Control records, so its NX snapshot types and versions cannot be established; pack it as NUP",
             ));
         }
-        let d = dump::discover(&root, self.title_id)?;
+        let d = dump::discover(&root, self.title_id, self.progress.as_deref())?;
         let mut plan = TransformPlan::new(Operation::Repack);
         plan.warnings.extend(d.warnings.iter().cloned());
         for p in &d.packages {
@@ -194,7 +200,7 @@ impl ArchiveBuilder {
         }
         plan.steps.push("store files as found (already decrypted), deduplicate by SHA-256, compress with zstd".into());
         plan.details.insert("source_directory".into(), root.display().to_string().into());
-        plan.details.insert("files".into(), (d.files.len() as u64).into());
+        plan.details.insert("files".into(), (d.file_count as u64).into());
         plan.details.insert("logical_bytes".into(), d.logical_size().into());
         plan.guarantees =
             vec![OutputGuarantee::ContentPreserved, OutputGuarantee::DerivedArtifact, OutputGuarantee::CompatibilityUnverified];
@@ -497,10 +503,10 @@ impl ArchivePlan {
     pub fn execute(self, output: impl AsRef<Path>, job: &JobContext) -> Result<OperationReport> {
         self.plan.revalidate()?;
         let output = output.as_ref().to_path_buf();
-        let mut inputs = self.plan.input_paths();
+        let inputs = self.plan.input_paths();
         if let Some(d) = &self.dump {
-            d.verify_unchanged()?;
-            inputs.extend(d.file_paths());
+            // Each dump file is checked against its scanned size and timestamp when opened.
+            d.check_output(&output)?;
         }
         let mut out = AtomicFile::create(&output, &job.io, &inputs)?;
         let mut rep = OperationReport::new(

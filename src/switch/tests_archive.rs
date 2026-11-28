@@ -723,3 +723,44 @@ fn nup_misplaced_meta_blocks_are_rejected_with_details() {
     let m = e.to_string();
     assert!(m.contains("overlaps") && m.contains("meta block") && m.contains("extent [0x"), "{m}");
 }
+
+#[test]
+fn dump_scan_reports_progress_opens_lazily_and_guards_output() {
+    struct Sink(std::sync::Mutex<Vec<crate::ProgressEvent>>);
+    impl crate::ProgressSink for Sink {
+        fn report(&self, e: &crate::ProgressEvent) {
+            self.0.lock().unwrap().push(e.clone());
+        }
+    }
+    let d = tempfile::tempdir().unwrap();
+    let dump = d.path().join("dump");
+    for i in 0..1100 {
+        write(&dump, &format!("romfs/d{}/f{i}.bin", i % 7), &[i as u8; 3]);
+    }
+    write(&dump, "exefs/main.npdm", &npdm(APP));
+    let sink = Arc::new(Sink(std::sync::Mutex::new(Vec::new())));
+    let plan = ArchiveBuilder::new(ArchiveFormat::Nup).input(&dump).progress(sink.clone()).plan().unwrap();
+    let events = sink.0.lock().unwrap().clone();
+    assert!(events.len() >= 3, "periodic and final scan events");
+    let last = events.last().unwrap();
+    assert_eq!(last.phase, crate::Phase::Planning);
+    assert_eq!(last.total, Some(last.completed), "the final event completes the line");
+    assert_eq!(last.completed, 1100 * 3 + npdm(APP).len() as u64);
+    assert_eq!(last.item.as_deref(), Some("1101 files scanned"));
+
+    // An output inside the dump folder is refused before anything is written.
+    let e = ArchiveBuilder::new(ArchiveFormat::Nup)
+        .input(&dump)
+        .plan()
+        .unwrap()
+        .execute(dump.join("romfs/new/out.nup"), &JobContext::default());
+    assert_eq!(e.err().unwrap().code(), ErrorCode::ConflictingOutput);
+    assert!(!dump.join("romfs/new").exists());
+
+    // Files are checked when opened: a file grown after scanning fails the write.
+    write(&dump, "romfs/d0/f0.bin", b"longer than before");
+    let e = plan.execute(d.path().join("late.nup"), &JobContext::default()).err().unwrap();
+    assert_eq!(e.code(), ErrorCode::ConflictingOutput, "{e}");
+    assert!(e.to_string().contains("changed after the dump folder was scanned"), "{e}");
+    assert!(!d.path().join("late.nup").exists());
+}

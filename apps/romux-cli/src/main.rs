@@ -720,7 +720,10 @@ impl App {
                 self.run_plan("bundle", b.plan()?.into_planned(output.clone()))
             }
             SwitchCmd::PackNup { directory, output, level, title_id } => {
-                let mut b = ArchiveBuilder::new(ArchiveFormat::Nup).input(directory).context(self.ctx.clone());
+                let mut b = ArchiveBuilder::new(ArchiveFormat::Nup)
+                    .input(directory)
+                    .context(self.ctx.clone())
+                    .progress(self.printer.progress_sink());
                 if let Some(l) = level {
                     b = b.level(*l);
                 }

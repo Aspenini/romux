@@ -574,3 +574,152 @@ fn nup_from_dump_folder() {
     write(&bare, "romfs/a.txt", b"changed!");
     assert!(plan.execute(d.path().join("late.nup"), &JobContext::default()).is_err());
 }
+
+/// Where the minimal NUP below puts its single meta block.
+#[derive(Clone, Copy, PartialEq)]
+enum MetaAt {
+    /// Between the TOC and `blob_offset` (layout of some third-party producers).
+    BeforeBlob,
+    /// After the extents (the reference packer's and Romux's layout).
+    AfterExtents,
+    /// Starting 4 bytes inside the TOC.
+    OverTocEnd,
+    /// On top of the file extent.
+    OverExtent,
+    /// Running past the end of the file.
+    PastEnd,
+}
+
+/// The §7 worked example (one base package, `romfs/hello.bin` raw), hand-assembled so the
+/// meta block position can be chosen independently of Romux's writer.
+fn tiny_nup(at: MetaAt) -> Vec<u8> {
+    let content = b"hello";
+    let mut meta = Vec::new();
+    for (t, payload) in [(nup::TLV_NPDM, &b"META-npdm"[..]), (nup::TLV_TITLE_NAME, &b"Tiny"[..])] {
+        meta.extend_from_slice(&t.to_le_bytes());
+        meta.extend_from_slice(&0u16.to_le_bytes());
+        meta.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        meta.extend_from_slice(payload);
+    }
+    let pool = b"romfshello.bin";
+    let toc_size = 0x30 + 0x40 + 2 * 0x18 + 0x50 + 2 * 4 + pool.len() as u64;
+    let toc_end = 0x80 + toc_size;
+    let align = |v: u64| v.div_ceil(16) * 16;
+    let (meta_off, blob, extent, file_size) = match at {
+        MetaAt::BeforeBlob => {
+            let blob = align(toc_end + meta.len() as u64);
+            (toc_end, blob, blob, blob + content.len() as u64)
+        }
+        MetaAt::OverTocEnd => {
+            let blob = align(toc_end + meta.len() as u64);
+            (toc_end - 4, blob, blob, blob + content.len() as u64)
+        }
+        MetaAt::AfterExtents | MetaAt::OverExtent | MetaAt::PastEnd => {
+            let blob = align(toc_end);
+            let m = blob + content.len() as u64;
+            let meta_off = if at == MetaAt::OverExtent { blob } else { m };
+            (meta_off, blob, blob, m + meta.len() as u64)
+        }
+    };
+    let meta_size = if at == MetaAt::PastEnd { meta.len() as u32 + 64 } else { meta.len() as u32 };
+    let mut t = Vec::new();
+    t.extend_from_slice(nup::TOC_MAGIC);
+    t.extend_from_slice(&1u32.to_le_bytes());
+    t.extend_from_slice(&2u64.to_le_bytes());
+    t.extend_from_slice(&1u64.to_le_bytes());
+    let pool_off = toc_size - pool.len() as u64;
+    t.extend_from_slice(&pool_off.to_le_bytes());
+    t.extend_from_slice(&(pool.len() as u64).to_le_bytes());
+    t.extend_from_slice(&0u64.to_le_bytes());
+    // Package: base 0x040074A01BF12000, root 0, no ExeFS, RomFS dir 1, version 1.0.0.
+    t.extend_from_slice(&0x0400_74A0_1BF1_2000u64.to_le_bytes());
+    for v in [0u32, 0xFFFF_FFFF, 1, 0x10000] {
+        t.extend_from_slice(&v.to_le_bytes());
+    }
+    t.extend_from_slice(&[0u8; 8]);
+    t.extend_from_slice(&meta_off.to_le_bytes());
+    t.extend_from_slice(&meta_size.to_le_bytes());
+    t.extend_from_slice(&[0u8; 20]);
+    // Directories: root "" (child slot 0), romfs (child slot 1).
+    for (off, len, first) in [(0u32, 0u32, 0u32), (0, 5, 1)] {
+        for v in [off, len, first, 1] {
+            t.extend_from_slice(&v.to_le_bytes());
+        }
+        t.extend_from_slice(&0u64.to_le_bytes());
+    }
+    // File hello.bin.
+    for v in [5u32, 9] {
+        t.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in [content.len() as u64, extent, content.len() as u64] {
+        t.extend_from_slice(&v.to_le_bytes());
+    }
+    t.extend_from_slice(&crate::crypto::sha256(content));
+    t.extend_from_slice(&[nup::CODEC_RAW, 0, 0, 0]);
+    t.extend_from_slice(&[0u8; 12]);
+    // Children: root -> dir 1; romfs -> file (node id 2 = dir_count + 0).
+    t.extend_from_slice(&1u32.to_le_bytes());
+    t.extend_from_slice(&2u32.to_le_bytes());
+    t.extend_from_slice(pool);
+    assert_eq!(t.len() as u64, toc_size);
+    let mut f = vec![0u8; file_size as usize];
+    f[..4].copy_from_slice(nup::MAGIC);
+    f[4..6].copy_from_slice(&0x80u16.to_le_bytes());
+    f[6..8].copy_from_slice(&1u16.to_le_bytes());
+    f[8..0x10].copy_from_slice(&0x80u64.to_le_bytes());
+    f[0x10..0x18].copy_from_slice(&toc_size.to_le_bytes());
+    f[0x18..0x38].copy_from_slice(&crate::crypto::sha256(&t));
+    f[0x38..0x40].copy_from_slice(&blob.to_le_bytes());
+    f[0x40..0x48].copy_from_slice(&file_size.to_le_bytes());
+    f[0x48..0x4C].copy_from_slice(&1u32.to_le_bytes());
+    f[0x50..0x60].copy_from_slice(&nup::derive_uuid([(0x0400_74A0_1BF1_2000, 0x10000, 0)].into_iter()));
+    f[0x80..toc_end as usize].copy_from_slice(&t);
+    f[extent as usize..extent as usize + content.len()].copy_from_slice(content);
+    let m = meta_off as usize;
+    if at != MetaAt::OverExtent && at != MetaAt::OverTocEnd {
+        f[m..m + meta.len()].copy_from_slice(&meta);
+    }
+    f
+}
+
+#[test]
+fn nup_meta_block_between_toc_and_blob_is_accepted() {
+    // Regression: a meta block before blob_offset (absolute offset, after the TOC) is valid
+    // NUP v1; Romux used to reject it as "outside the blob region".
+    for at in [MetaAt::BeforeBlob, MetaAt::AfterExtents] {
+        let bytes = tiny_nup(at);
+        let n = nup::Nup::open(Arc::new(MemorySource::new(bytes.clone())), &Default::default()).unwrap();
+        let p = &n.packages[0];
+        assert_eq!(p.meta.get(&nup::TLV_NPDM).map(|v| v.as_slice()), Some(&b"META-npdm"[..]));
+        assert_eq!(p.text(nup::TLV_TITLE_NAME).as_deref(), Some("Tiny"));
+        if at == MetaAt::BeforeBlob {
+            assert!(p.meta_offset < n.blob_offset);
+        }
+        let r = nup::NupReader::open(Arc::new(MemorySource::new(bytes)), &OpenContext::default()).unwrap();
+        let v = r.verify(VerifyLevel::All, &JobContext::default()).unwrap();
+        assert!(v.no_failures(), "{:#?}", v.checks);
+        assert_eq!(read_entry(&r, "base/romfs/hello.bin"), b"hello");
+        assert_eq!(r.info().unwrap().title.as_deref(), Some("Tiny"));
+    }
+}
+
+#[test]
+fn nup_misplaced_meta_blocks_are_rejected_with_details() {
+    let open = |at| nup::Nup::open(Arc::new(MemorySource::new(tiny_nup(at))), &Default::default()).err().expect("must be rejected");
+    let e = open(MetaAt::OverTocEnd);
+    assert_eq!(e.code(), ErrorCode::BoundsViolation);
+    let m = e.to_string();
+    assert!(m.contains("NUP v1, header_version 1"), "{m}");
+    assert!(m.contains("package 0 (040074a01bf12000) meta block [0x"), "{m}");
+    assert!(m.contains("after the superblock and TOC") && m.contains("blob region starts at 0x"), "{m}");
+    assert!(e.context().offset.is_some(), "the offending offset is attached");
+
+    let e = open(MetaAt::PastEnd);
+    assert_eq!(e.code(), ErrorCode::BoundsViolation);
+    assert!(e.to_string().contains("is outside the region it may occupy"), "{e}");
+
+    let e = open(MetaAt::OverExtent);
+    assert_eq!(e.code(), ErrorCode::BoundsViolation);
+    let m = e.to_string();
+    assert!(m.contains("overlaps") && m.contains("meta block") && m.contains("extent [0x"), "{m}");
+}

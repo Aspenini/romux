@@ -180,6 +180,7 @@ impl Nup {
             return Err(Error::malformed("not a NUP v1 container (magic)"));
         }
         let header_size = u16_at(&sb, 4) as u64;
+        let header_version = u16_at(&sb, 6);
         let toc_offset = u64_at(&sb, 8);
         let toc_size = u64_at(&sb, 0x10);
         let toc_sha256: [u8; 32] = sb[0x18..0x38].try_into().map_err(|_| Error::internal("sha slice"))?;
@@ -294,9 +295,10 @@ impl Nup {
                 return Err(Error::bounds("NUP directory child range exceeds the child array"));
             }
         }
+        let spec = format!("NUP v1, header_version {header_version}");
         let mut warnings = Vec::new();
         let mut packages = Vec::new();
-        for mut p in raw_packages {
+        for (pi, p) in raw_packages.into_iter().enumerate() {
             if p.kind >= 5 {
                 return Err(Error::unsupported(format!("NUP package kind {} is not defined in v1", p.kind)));
             }
@@ -312,19 +314,24 @@ impl Nup {
                 return Err(Error::malformed("NUP package has no root directory"));
             }
             if p.meta_size > 0 {
-                let end = p.meta_offset.checked_add(p.meta_size as u64).ok_or_else(|| Error::bounds("meta block overflows"))?;
-                if p.meta_offset < blob_offset || end > len {
-                    return Err(Error::bounds("NUP meta block is outside the blob region"));
-                }
-                let block = read_vec(source.as_ref(), p.meta_offset, p.meta_size as u64, 64 << 20)?;
-                let mut o = 0usize;
-                while o + 8 <= block.len() {
-                    let t = u16_at(&block, o);
-                    let size = u32_at(&block, o + 4) as usize;
-                    let e = (o + 8).checked_add(size).ok_or_else(|| Error::bounds("meta TLV overflows"))?;
-                    let payload = block.get(o + 8..e).ok_or_else(|| Error::malformed("meta TLV overruns its block"))?;
-                    p.meta.entry(t).or_insert_with(|| payload.to_vec());
-                    o = e;
+                // §3.1/§5: meta_offset is an absolute file offset. The specification places no
+                // meta block inside the blob region specifically (producers may write them
+                // between the TOC and blob_offset); it must lie after the superblock and TOC,
+                // inside the file, and overlap no extent or other meta block (checked below).
+                let end = p.meta_offset.checked_add(p.meta_size as u64).ok_or_else(|| {
+                    Error::bounds(format!(
+                        "{spec}: package {pi} ({:016x}) meta block at 0x{:x} + 0x{:x} bytes overflows",
+                        p.title_id, p.meta_offset, p.meta_size
+                    ))
+                    .with_offset(p.meta_offset)
+                })?;
+                if p.meta_offset < toc_end || end > len {
+                    return Err(Error::bounds(format!(
+                        "{spec}: package {pi} ({:016x}) meta block [0x{:x}, 0x{end:x}) (0x{:x} bytes) is outside the region it may occupy, \
+                         [0x{toc_end:x}, 0x{len:x}) after the superblock and TOC (blob region starts at 0x{blob_offset:x})",
+                        p.title_id, p.meta_offset, p.meta_size
+                    ))
+                    .with_offset(p.meta_offset));
                 }
             }
             packages.push(p);
@@ -342,15 +349,44 @@ impl Nup {
                 }
                 continue;
             }
-            let end = f.extent_offset.checked_add(f.extent_size).ok_or_else(|| Error::bounds("extent overflows"))?;
+            let end = f.extent_offset.checked_add(f.extent_size).ok_or_else(|| {
+                Error::bounds(format!("{spec}: extent of {} at 0x{:x} + 0x{:x} bytes overflows", f.name, f.extent_offset, f.extent_size))
+                    .with_offset(f.extent_offset)
+            })?;
             if f.extent_offset < blob_offset || end > len {
-                return Err(Error::bounds(format!("extent of {} is outside the blob region", f.name)));
+                return Err(Error::bounds(format!(
+                    "{spec}: extent of {} [0x{:x}, 0x{end:x}) (0x{:x} bytes) is outside the blob region [0x{blob_offset:x}, 0x{len:x})",
+                    f.name, f.extent_offset, f.extent_size
+                ))
+                .with_offset(f.extent_offset));
             }
             if f.extent_offset % ALIGN != 0 {
                 warnings.push(format!("extent of {} is not 16-byte aligned", f.name));
             }
             if f.codec == CODEC_RAW && f.extent_size != f.size {
                 return Err(Error::malformed(format!("raw extent of {} differs from its size", f.name)));
+            }
+        }
+        check_overlaps(&spec, &packages, &files)?;
+        // Only now that every region is known to be in bounds and disjoint, read the TLVs.
+        for (pi, p) in packages.iter_mut().enumerate() {
+            if p.meta_size == 0 {
+                continue;
+            }
+            let block = read_vec(source.as_ref(), p.meta_offset, p.meta_size as u64, 64 << 20)?;
+            let mut o = 0usize;
+            while o + 8 <= block.len() {
+                let t = u16_at(&block, o);
+                let size = u32_at(&block, o + 4) as usize;
+                let payload = (o + 8).checked_add(size).and_then(|e| block.get(o + 8..e)).ok_or_else(|| {
+                    Error::malformed(format!(
+                        "{spec}: package {pi} ({:016x}) meta TLV 0x{t:04x} at block offset 0x{o:x} declares 0x{size:x} payload bytes,                          past the end of its 0x{:x}-byte meta block at 0x{:x}",
+                        p.title_id, p.meta_size, p.meta_offset
+                    ))
+                    .with_offset(p.meta_offset + o as u64)
+                })?;
+                p.meta.entry(t).or_insert_with(|| payload.to_vec());
+                o += 8 + size;
             }
         }
         let nup = Nup { source, toc_size, toc_sha256, blob_offset, file_size, uuid, packages, dirs, files, children, warnings };
@@ -427,6 +463,44 @@ impl Nup {
     pub fn app_package(&self) -> &NupPackage {
         self.packages.iter().find(|p| p.kind == KIND_BASE).unwrap_or(&self.packages[0])
     }
+}
+
+/// §6.1.2: no two regions may overlap. Deduplicated files legitimately share one identical
+/// extent (§3.6), and identical ranges of the same kind are accepted; any other overlap,
+/// including a meta block over an extent, is rejected.
+fn check_overlaps(spec: &str, packages: &[NupPackage], files: &[NupFile]) -> Result<()> {
+    // (start, end, is_meta, owner description)
+    let mut extents: Vec<(u64, u64)> =
+        files.iter().filter(|f| f.size > 0 && f.extent_size > 0).map(|f| (f.extent_offset, f.extent_offset + f.extent_size)).collect();
+    extents.sort_unstable();
+    extents.dedup();
+    let mut metas: Vec<(u64, u64, usize)> = packages
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.meta_size > 0)
+        .map(|(i, p)| (p.meta_offset, p.meta_offset + p.meta_size as u64, i))
+        .collect();
+    metas.sort_unstable();
+    metas.dedup_by_key(|m| (m.0, m.1));
+    let mut regions: Vec<(u64, u64, Option<usize>)> = extents.into_iter().map(|(a, b)| (a, b, None)).collect();
+    regions.extend(metas.into_iter().map(|(a, b, i)| (a, b, Some(i))));
+    regions.sort_unstable_by_key(|r| (r.0, r.1));
+    let describe = |r: &(u64, u64, Option<usize>)| match r.2 {
+        Some(i) => format!("package {i} ({:016x}) meta block [0x{:x}, 0x{:x})", packages[i].title_id, r.0, r.1),
+        None => format!("extent [0x{:x}, 0x{:x})", r.0, r.1),
+    };
+    let mut widest: Option<&(u64, u64, Option<usize>)> = None;
+    for r in &regions {
+        if let Some(w) = widest {
+            if r.0 < w.1 {
+                return Err(Error::bounds(format!("{spec}: {} overlaps {}", describe(r), describe(w))).with_offset(r.0));
+            }
+        }
+        if widest.is_none_or(|w| r.1 > w.1) {
+            widest = Some(r);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn derive_uuid(ids: impl Iterator<Item = (u64, u32, u8)>) -> [u8; 16] {
